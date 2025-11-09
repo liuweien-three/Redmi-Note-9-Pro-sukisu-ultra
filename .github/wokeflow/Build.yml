@@ -1,0 +1,179 @@
+name: Build Kernel for Gauguin
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel Version'
+        required: false
+        default: '4.19'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+   
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+     
+    - name: Download LineageOS Kernel Source
+      run: |
+        echo "📥 Downloading LineageOS kernel source..."
+        wget -q https://github.com/LineageOS/android_kernel_xiaomi_sm7150/archive/refs/heads/lineage-21.0.zip
+        unzip -q lineage-21.0.zip
+        mv android_kernel_xiaomi_sm7150-lineage-21.0 kernel-source
+        echo "✅ Kernel source ready"
+       
+    - name: Download SukiSU Source
+      run: |
+        echo "📥 Downloading SukiSU..."
+        wget -q https://github.com/ProjectSukisu/SukiSU/archive/refs/heads/main.zip
+        unzip -q main.zip
+        mv SukiSU-main sukisu-source
+        echo "✅ SukiSU source ready"
+       
+    - name: Install Dependencies
+      run: |
+        echo "🔧 Installing build dependencies..."
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          clang \
+          lld \
+          libncurses-dev \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          bc \
+          git \
+          gcc-aarch64-linux-gnu \
+          gcc-arm-linux-gnueabi \
+          python3 \
+          python3-pip
+       
+    - name: Setup Kernel Build
+      run: |
+        echo "⚙️ Setting up kernel build..."
+        cd kernel-source
+       
+        # Use provided config file
+        if [ -f "../config" ]; then
+          echo "📝 Using provided config file"
+          cp ../config .config
+        else
+          echo "⚠️ No config found, using defconfig"
+          make ARCH=arm64 defconfig
+        fi
+       
+        # Integrate SukiSU
+        echo "🔗 Integrating SukiSU..."
+        mkdir -p drivers/misc/sukisu
+        cp -r ../sukisu-source/kernel/* drivers/misc/sukisu/
+       
+        # Add SukiSU to build system
+        echo 'obj-$(CONFIG_SUKISU) += sukisu/' >> drivers/misc/Makefile
+        echo 'source "drivers/misc/sukisu/Kconfig"' >> drivers/misc/Kconfig
+       
+        # Configure kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+       
+        # Disable problem features for stable build
+        ./scripts/config --undefine CONFIG_MODULES 2>/dev/null || true
+        ./scripts/config --undefine CONFIG_MODVERSIONS 2>/dev/null || true
+       
+        make olddefconfig
+       
+        echo "✅ Kernel configuration complete"
+       
+    - name: Build Kernel
+      run: |
+        echo "🏗️ Building kernel..."
+        cd kernel-source
+       
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=clang
+        export LD=ld.lld
+       
+        # Start build with detailed output
+        make -j$(nproc) 2>&1 | tee build.log
+       
+        echo "✅ Build process completed"
+       
+    - name: Check Build Results
+      run: |
+        cd kernel-source
+        echo "📊 Build results:"
+        if [ -f "arch/arm64/boot/Image" ]; then
+          echo "🎉 SUCCESS: Kernel image generated!"
+          ls -lh arch/arm64/boot/Image
+          file arch/arm64/boot/Image
+        else
+          echo "❌ FAILED: No kernel image found"
+          echo "Last build errors:"
+          tail -20 build.log | grep -i error || echo "No errors in log"
+          exit 1
+        fi
+       
+    - name: Create Flashable Zip
+      run: |
+        cd kernel-source
+        echo "📦 Creating flashable package..."
+       
+        mkdir -p anykernel
+        cp arch/arm64/boot/Image anykernel/
+       
+        # Create AnyKernel3 script
+        cat > anykernel/anykernel.sh << 'EOF'
+#!/system/bin/sh
+# AnyKernel3 Script for Gauguin
+
+## AnyKernel setup
+# begin properties
+properties() { '
+kernel.string=SukiSU Kernel for Gauguin
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=gauguin
+device.name2=gauguinpro
+'; } # end properties
+
+## AnyKernel methods
+. tools/ak3-core.sh;
+
+## AnyKernel install
+dump_boot;
+write_boot;
+## end install
+EOF
+
+        chmod +x anykernel/anykernel.sh
+        cd anykernel
+        zip -r9 ../sukisu-kernel-gauguin.zip .
+        cd ..
+       
+        echo "✅ Flashable zip created"
+       
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-artifacts
+        path: |
+          kernel-source/arch/arm64/boot/Image
+          kernel-source/sukisu-kernel-gauguin.zip
+          kernel-source/.config
+          kernel-source/build.log
+        retention-days: 7
+       
+    - name: Build Status
+      run: |
+        echo "🏁 Build process finished"
+        echo "📥 Download artifacts from the Actions tab"
+        echo "📱 Flash suksiu-kernel-gauguin.zip in recovery"
