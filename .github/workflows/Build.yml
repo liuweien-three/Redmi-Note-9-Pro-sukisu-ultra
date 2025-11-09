@@ -1,0 +1,81 @@
+name: Build Kernel for Gauguin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+   
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+     
+    - name: Download LineageOS Kernel Source
+      run: |
+        echo "📥 Downloading LineageOS kernel source..."
+        wget -q https://github.com/LineageOS/android_kernel_xiaomi_sm7150/archive/refs/heads/lineage-21.0.zip
+        unzip -q lineage-21.0.zip
+        mv android_kernel_xiaomi_sm7150-lineage-21.0 kernel-source
+        echo "✅ Kernel source ready"
+       
+    - name: Download SukiSU Source
+      run: |
+        echo "📥 Downloading SukiSU..."
+        wget -q https://github.com/ProjectSukisu/SukiSU/archive/refs/heads/main.zip
+        unzip -q main.zip
+        mv SukiSU-main sukisu-source
+        echo "✅ SukiSU source ready"
+       
+    - name: Install Dependencies
+      run: |
+        echo "🔧 Installing build dependencies..."
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          clang \
+          libncurses-dev \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          bc \
+          gcc-aarch64-linux-gnu
+       
+    - name: Build Kernel with Default Config
+      run: |
+        echo "🏗️ Building kernel..."
+        cd kernel-source
+
+        make ARCH=arm64 defconfig
+
+        mkdir -p drivers/misc/sukisu
+        cp -r ../sukisu-source/kernel/* drivers/misc/sukisu/
+        echo 'obj-$(CONFIG_SUKISU) += sukisu/' >> drivers/misc/Makefile
+
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+
+        ./scripts/config --set-val CONFIG_SUKISU y
+        ./scripts/config --set-val CONFIG_MODULES n
+       
+        make olddefconfig
+
+        make -j$(nproc)
+       
+    - name: Check Build Results
+      run: |
+        cd kernel-source
+        if [ -f "arch/arm64/boot/Image" ]; then
+          echo "🎉 SUCCESS: Kernel image generated!"
+          ls -lh arch/arm64/boot/Image
+        else
+          echo "❌ FAILED: No kernel image found"
+          exit 1
+        fi
+       
+    - name: Upload Kernel Image
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-image
+        path: kernel-source/arch/arm64/boot/Image
