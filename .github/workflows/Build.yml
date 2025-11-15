@@ -21,36 +21,38 @@ jobs:
       run: |
         git clone -b lineage-23.0 https://github.com/LineageOS/android_kernel_xiaomi_gauguin.git ${{ env.KERNEL_DIR }} ||
 
-        echo "❌ Kernel source clone failed"
+        (echo "❌ Kernel source clone failed" && exit 1)
 
-    - name: Integrate SukiSU Ultra
+    - name: Manually Integrate SukiSU
       run: |
         cd ${{ env.KERNEL_DIR }}
         
-        echo "🔧 Integrating SukiSU Ultra..."
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -
+        echo "🔧 Manually integrating SukiSU..."
 
-        echo "📋 Verifying integration..."
-        if [ -d "drivers/sukisu" ]; then
-          echo "✅ SukiSU Ultra integrated successfully (drivers/sukisu found)"
-        elif [ -f "KSU" ]; then
-          echo "✅ SukiSU Ultra integrated successfully (KSU file found)" 
-        elif grep -q "sukisu" Makefile || grep -q "sukisu" drivers/Kconfig; then
-          echo "✅ SukiSU Ultra integrated successfully (Makefile/Kconfig modified)"
-        else
-          echo "❌ SukiSU Ultra integration failed - no traces found"
+        mkdir -p drivers/sukisu
 
-          echo "📁 Current directory contents:"
-          ls -la
-          echo "📁 drivers directory contents:"
-          ls -la drivers/ | head -20
-          exit 1
+        echo "📥 Downloading SukiSU source files..."
+        wget -q -O drivers/sukisu/Kconfig https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/Kconfig
+        wget -q -O drivers/sukisu/Makefile https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/Makefile
+        wget -q -O drivers/sukisu/sukisu.c https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/sukisu.c
+        wget -q -O drivers/sukisu/sukisu.h https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/sukisu.h
+        wget -q -O drivers/sukisu/sulog.c https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/sulog.c
+        wget -q -O drivers/sukisu/sulog.h https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/sulog.h
+
+        if ! grep -q "sukisu" drivers/Kconfig; then
+          echo 'source "drivers/sukisu/Kconfig"' >> drivers/Kconfig
+          echo "✅ Added SukiSU to drivers/Kconfig"
         fi
 
-        echo "🔍 Checking Kconfig options..."
-        if grep -r "SUKISU" . --include="Kconfig*"; then
-          echo "✅ SukiSU Kconfig options found"
+        if ! grep -q "sukisu" drivers/Makefile; then
+          echo 'obj-$(CONFIG_SUKISU) += sukisu/' >> drivers/Makefile
+          echo "✅ Added SukiSU to drivers/Makefile"
         fi
+
+        echo "📋 Verification:"
+        ls -la drivers/sukisu/ && echo "✅ SukiSU directory created"
+        grep -n "sukisu" drivers/Kconfig && echo "✅ Kconfig modified"
+        grep -n "sukisu" drivers/Makefile && echo "✅ Makefile modified"
 
     - name: Get AnyKernel3
       uses: actions/checkout@v4
@@ -74,7 +76,8 @@ jobs:
           unzip \
           wget
 
-        wget -qO- https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.
+        wget -qO- https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu.tar.xz | tar -xJ
+        echo "GCC_PATH=$(pwd)/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin" >> $GITHUB_ENV
 
     - name: Setup Environment
       run: |
@@ -86,32 +89,47 @@ jobs:
     - name: Build Kernel
       run: |
         cd ${{ env.KERNEL_DIR }}
-
+        
+        echo "🧹 Cleaning build directory..."
         make O=out clean && make O=out mrproper
-
+        
+        echo "⚙️ Applying config: ${{ env.CONFIG }}"
         make O=out ${{ env.CONFIG }}
 
-        if ! grep -q "CONFIG_SUKISU=y" out/.config; then
+        echo "🔧 Configuring SukiSU..."
+        if ! grep -q "CONFIG_SUKISU" out/.config; then
           echo "CONFIG_SUKISU=y" >> out/.config
-          echo "✅ Manually enabled SukiSU in config"
+          echo "✅ Added CONFIG_SUKISU=y to .config"
+        else
+          sed -i 's/CONFIG_SUKISU=.*/CONFIG_SUKISU=y/' out/.config
+          echo "✅ Set CONFIG_SUKISU=y in .config"
         fi
 
+        echo "📋 SukiSU config:"
+        grep "SUKISU" out/.config || echo "⚠️ No SUKISU config found"
+        
         echo "🚀 Starting kernel compilation..."
         make O=out -j$(nproc) \
           CROSS_COMPILE=aarch64-none-linux-gnu-
 
         if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
           echo "✅ Kernel built successfully!"
-          ls -lh out/arch/arm64/boot/
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
+          echo "📊 Checking if SukiSU was compiled..."
+          find out -name "*sukisu*" -o -name "*sulog*" | head -10
         else
           echo "❌ Kernel build failed"
-          find out -name "*.dtb" -o -name "Image*" | head -10
+          find out -name "*.o" | head -10
           exit 1
         fi
 
     - name: Package Kernel
       run: |
+        echo "📦 Packaging kernel..."
         cp ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb ${{ env.ANY_KERNEL_DIR }}/
+        
+        cd ${{ env.ANY_KERNEL_DIR }}
+        zip -r9 ../${{ env.KERNEL_NAME }}-$(date +%Y%m%d).zip .
 
     - name: Upload Kernel Zip
       uses: actions/upload-artifact@v4
