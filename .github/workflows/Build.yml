@@ -17,11 +17,20 @@ jobs:
     
     steps:
 
-    - name: Checkout LineageOS 23 Kernel
+    - name: Download Kernel Source
       run: |
-        echo "🔧 Cloning LineageOS 23 kernel source..."
-        git clone -b lineage-23.0 --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_sm7125.git ${{ env.KERNEL_DIR }}
-        echo "✅ Kernel source cloned successfully"
+        echo "🔧 Downloading kernel source from direct link..."
+        wget -O kernel.zip "https://github.com/LineageOS/android_kernel_xiaomi_gauguin/archive/refs/heads/lineage-23.0.zip"
+        
+        if [ -f "kernel.zip" ]; then
+          echo "✅ Kernel source downloaded, extracting..."
+          unzip -q kernel.zip
+          mv android_kernel_xiaomi_gauguin-lineage-23.0 ${{ env.KERNEL_DIR }}
+          echo "✅ Kernel source extracted to ${{ env.KERNEL_DIR }}"
+        else
+          echo "❌ Kernel source download failed"
+          exit 1
+        fi
 
     - name: Integrate SukiSU Ultra
       run: |
@@ -31,13 +40,14 @@ jobs:
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash - || true
         
         echo "📋 Setup script execution completed"
-        echo "ℹ️  Continuing build regardless of script result"
 
     - name: Get AnyKernel3
-      uses: actions/checkout@v4
-      with:
-        repository: osm0sis/AnyKernel3
-        path: ${{ env.ANY_KERNEL_DIR }}
+      run: |
+        echo "🔧 Downloading AnyKernel3..."
+        wget -O anykernel3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
+        unzip -q anykernel3.zip
+        mv AnyKernel3-master ${{ env.ANY_KERNEL_DIR }}
+        echo "✅ AnyKernel3 downloaded and extracted"
 
     - name: Setup Build Environment
       run: |
@@ -63,7 +73,7 @@ jobs:
         echo "ARCH=arm64" >> $GITHUB_ENV
         echo "SUBARCH=arm64" >> $GITHUB_ENV
         echo "CROSS_COMPILE=aarch64-none-linux-gnu-" >> $GITHUB_ENV
-        echo "PATH=$GCC_PATH:$PATH" >> $GITHUB_ENV
+        echo "PATH=$GITHUB_PATH:$GCC_PATH" >> $GITHUB_ENV
 
     - name: Build Kernel
       run: |
@@ -91,10 +101,12 @@ jobs:
         if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
           echo "✅ Kernel built successfully!"
           ls -lh out/arch/arm64/boot/Image.gz-dtb
+          echo "📊 File size: $(du -h out/arch/arm64/boot/Image.gz-dtb | cut -f1)"
         else
-          echo "❌ Kernel build failed"
-          echo "Debug info:"
-          find out -name "*.o" | head -5
+          echo "❌ Kernel build failed - checking for output files..."
+          find out/arch/arm64/boot/ -type f 2>/dev/null | head -10
+          echo "🔍 Build log tail:"
+          tail -50 out/.config || true
           exit 1
         fi
 
@@ -103,8 +115,23 @@ jobs:
         echo "📦 Packaging kernel..."
         cp ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb ${{ env.ANY_KERNEL_DIR }}/
         
+        # 创建 anykernel.sh 脚本
+        cat > ${{ env.ANY_KERNEL_DIR }}/anykernel.sh << 'EOF'
+        #!/system/bin/sh
+        # AnyKernel3 Script for Gauguinpro
+        
+        block=/dev/block/bootdevice/by-name/boot;
+        is_slot_device=0;
+        ramdisk_compression=auto;
+        
+        . /tmp/anykernel/tools/ak3-core.sh;
+        
+        dump_boot;
+        write_boot;
+        EOF
+        
         cd ${{ env.ANY_KERNEL_DIR }}
-        zip -r9 ../${{ env.KERNEL_NAME }}-$(date +%Y%m%d).zip .
+        zip -r9 ../${{ env.KERNEL_NAME }}-$(date +%Y%m%d-%H%M).zip .
 
     - name: Upload Kernel Zip
       uses: actions/upload-artifact@v4
