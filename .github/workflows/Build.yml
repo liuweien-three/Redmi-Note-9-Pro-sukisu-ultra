@@ -1,4 +1,4 @@
-name: Build SukiSU Ultra Kernel for gauguinpro
+name: Build SukiSU Ultra Kernel for Gauguinpro
 
 on:
   workflow_dispatch:
@@ -19,19 +19,37 @@ jobs:
 
     - name: Checkout Gauguinpro Kernel Source
       run: |
+        git clone -b lineage-23.0 https://github.com/LineageOS/android_kernel_xiaomi_gauguin.git ${{ env.KERNEL_DIR }} ||
 
-        git clone -b lineage-23.0 https://github.com/LineageOS/android_kernel_xiaomi_gauguin.git ${{ env.KERNEL_DIR }}
+        echo "❌ Kernel source clone failed"
 
     - name: Integrate SukiSU Ultra
       run: |
         cd ${{ env.KERNEL_DIR }}
+        
+        echo "🔧 Integrating SukiSU Ultra..."
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -
 
-        if [ -d "drivers/sukisu" ] || [ -f "KSU" ]; then
-          echo "✅ SukiSU Ultra integrated successfully"
+        echo "📋 Verifying integration..."
+        if [ -d "drivers/sukisu" ]; then
+          echo "✅ SukiSU Ultra integrated successfully (drivers/sukisu found)"
+        elif [ -f "KSU" ]; then
+          echo "✅ SukiSU Ultra integrated successfully (KSU file found)" 
+        elif grep -q "sukisu" Makefile || grep -q "sukisu" drivers/Kconfig; then
+          echo "✅ SukiSU Ultra integrated successfully (Makefile/Kconfig modified)"
         else
-          echo "❌ SukiSU Ultra integration failed"
+          echo "❌ SukiSU Ultra integration failed - no traces found"
+
+          echo "📁 Current directory contents:"
+          ls -la
+          echo "📁 drivers directory contents:"
+          ls -la drivers/ | head -20
           exit 1
+        fi
+
+        echo "🔍 Checking Kconfig options..."
+        if grep -r "SUKISU" . --include="Kconfig*"; then
+          echo "✅ SukiSU Kconfig options found"
         fi
 
     - name: Get AnyKernel3
@@ -56,8 +74,7 @@ jobs:
           unzip \
           wget
 
-        wget -qO- https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu.tar.xz | tar -xJ
-        echo "GCC_PATH=$(pwd)/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin" >> $GITHUB_ENV
+        wget -qO- https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.
 
     - name: Setup Environment
       run: |
