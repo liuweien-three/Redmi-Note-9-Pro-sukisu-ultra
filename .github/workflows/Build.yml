@@ -1,4 +1,4 @@
-name: Build SukiSU Kernel
+name: Build Android Kernel for Gauguin
 
 on:
   push:
@@ -10,61 +10,110 @@ jobs:
     runs-on: ubuntu-latest
    
     steps:
-    - name: Checkout SukiSU source
+    - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        repository: SukiSU-Ultra/SukiSU-Ultra
-        path: sukisu
-       
-    - name: Download kernel source via mirror
+     
+    - name: Download kernel source
       run: |
-        wget https://mirrors.tuna.tsinghua.edu.cn/kernel/v4.x/linux-4.19.325.tar.xz
+        wget -q https://mirrors.tuna.tsinghua.edu.cn/kernel/v4.x/linux-4.19.325.tar.xz
         tar -xf linux-4.19.325.tar.xz
         mv linux-4.19.325 kernel-src
        
-    - name: Install dependencies
+    - name: Download SukiSU source
       run: |
-        sudo sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
-        sudo sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
-        sudo apt update
-        sudo apt install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc python3 git gcc-aarch64-linux-gnu
+        git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu-src
        
-    - name: Setup build environment
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential libncurses-dev bison flex libssl-dev libelf-dev \
+          bc python3 git gcc-aarch64-linux-gnu ccache lz4
+       
+    - name: Apply SukiSU configuration
       run: |
         cd kernel-src
 
-        cp ../sukisu/arch/arm64/configs/gauguin_defconfig arch/arm64/configs/ || echo "使用默认配置"
+        cp ../sukisu-src/arch/arm64/configs/gauguin_defconfig arch/arm64/configs/
+
+        make gauguin_defconfig
        
-    - name: Build kernel
+    - name: Fix critical config options
+      run: |
+        cd kernel-src
+
+        ./scripts/config --enable ARM64_APPENDED_DTB
+        ./scripts/config --enable ARCH_QCOM
+        ./scripts/config --set-val NR_CPUS 8
+
+        make olddefconfig
+       
+    - name: Verify kernel configuration
+      run: |
+        cd kernel-src
+        echo "=== 关键配置检查 ==="
+        grep -E "ARM64_APPENDED_DTB|ARCH_QCOM|NR_CPUS" .config
+        echo "=== 设备树配置 ==="
+        grep -i "dtb" .config || true
+       
+    - name: Build kernel with all targets
       run: |
         cd kernel-src
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-
-        make gauguin_defconfig || make defconfig
-        echo "开始编译内核..."
-        make -j$(nproc) 2>&1 | tee build.log
        
-    - name: Check build results
+        echo "开始完整编译..."
+
+        make -j$(nproc) all dtbs 2>&1 | tee build.log
+       
+    - name: Verify build outputs
       run: |
         cd kernel-src
-        if [ -f "arch/arm64/boot/Image.gz" ]; then
-          echo "✅ 内核编译成功！"
-          ls -la arch/arm64/boot/
+        echo "=== 编译产物验证 ==="
+
+        if [ -f "arch/arm64/boot/Image" ]; then
+          echo "✅ Image 文件存在"
+          ls -lh arch/arm64/boot/Image
         else
-          echo "❌ 内核编译失败"
-          tail -100 build.log
+          echo "❌ Image 文件缺失"
           exit 1
         fi
+
+        echo "=== 设备树文件 ==="
+        find arch/arm64/boot/dts -name "*.dtb" -type f | head -10 || echo "未找到 .dtb 文件"
+
+        echo "=== 内核配置中的设备树支持 ==="
+        grep -i "appended_dtb" .config || echo "设备树未内置"
        
-    - name: Upload kernel artifacts
+    - name: Create AnyKernel3 package
+      run: |
+
+        git clone https://github.com/osm0sis/AnyKernel3
+        cd AnyKernel3
+
+        cp ../kernel-src/arch/arm64/boot/Image ./
+
+        cat > anykernel.sh << 'EOF'
+#!/system/bin/sh
+# AnyKernel3 Script for Gauguin
+
+. tools/ak3-core.sh;
+
+dump_boot;
+write_boot;
+EOF
+       
+        chmod +x anykernel.sh
+
+        zip -r9 SukiSU-Kernel-gauguin.zip ./* -x "*.git*"
+       
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: sukisu-kernel-build
+        name: sukisu-kernel-package
         path: |
-          kernel-src/arch/arm64/boot/Image.gz
-          kernel-src/arch/arm64/boot/dts/
+          kernel-src/arch/arm64/boot/Image
+          AnyKernel3/SukiSU-Kernel-gauguin.zip
           kernel-src/.config
           kernel-src/build.log
-        retention-days: 7
