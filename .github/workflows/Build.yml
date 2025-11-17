@@ -31,7 +31,6 @@ jobs:
     - name: Integrate SukiSU safely
       run: |
         cd kernel-src
-       
         echo "安全集成 SukiSU..."
 
         for dir in kernel drivers fs net; do
@@ -40,7 +39,6 @@ jobs:
             cp -r "../sukisu/$dir" "./" 2>/dev/null || echo "$dir 复制完成"
           fi
         done
-       
         echo "SukiSU 集成完成"
      
     - name: Build kernel
@@ -50,7 +48,22 @@ jobs:
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
-        make lineageos_gauguin_defconfig
+        for config in \
+          lineageos_gauguin_defconfig \
+          gauguin_defconfig \
+          lineage_gauguin_defconfig \
+          vendor/gauguin_defconfig \
+          vendor/gauguin-perf_defconfig \
+          sm7150_defconfig \
+          perf_defconfig \
+          defconfig; do
+         
+          if make $config 2>/dev/null; then
+            echo "✅ 使用配置: $config"
+            break
+          fi
+        done
+
         echo "开始编译 SukiSU 增强内核..."
         make -j$(nproc) all dtbs 2>&1 | tee build.log
      
@@ -59,9 +72,9 @@ jobs:
         cd kernel-src
         if [ -f "arch/arm64/boot/Image" ]; then
           echo "✅ SukiSU 内核编译成功！"
-          echo "文件大小:"
+          echo "文件:"
           ls -lh arch/arm64/boot/Image
-          echo "设备树文件:"
+          echo "设备树:"
           find arch/arm64/boot/dts -name "*.dtb" -type f | head -5
         else
           echo "❌ 内核编译失败"
