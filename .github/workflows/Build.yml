@@ -33,6 +33,11 @@ jobs:
       run: |
         cd kernel-src
         cp ../sukisu/arch/arm64/configs/gauguin_defconfig arch/arm64/configs/ || echo "使用默认配置"
+    - name: Find correct config 
+      run: |
+       cd kernel-src
+       find ../sukisu/arch/arm64/configs -type f | head -20
+       find arch/arm64/configs -name "*gauguin*" -o -name "*qcom*" | head -10
      
     - name: Build kernel
       run: |
