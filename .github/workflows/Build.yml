@@ -32,14 +32,12 @@ jobs:
       run: |
         cd kernel-src
         echo "安全集成 SukiSU..."
-
         for dir in kernel drivers fs net; do
           if [ -d "../sukisu/$dir" ]; then
             echo "复制 $dir 目录..."
             cp -r "../sukisu/$dir" "./" 2>/dev/null || echo "$dir 复制完成"
           fi
         done
-        echo "SukiSU 集成完成"
      
     - name: Build kernel
       run: |
@@ -48,33 +46,18 @@ jobs:
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
-        for config in \
-          lineageos_gauguin_defconfig \
-          gauguin_defconfig \
-          lineage_gauguin_defconfig \
-          vendor/gauguin_defconfig \
-          vendor/gauguin-perf_defconfig \
-          sm7150_defconfig \
-          perf_defconfig \
-          defconfig; do
-         
-          if make $config 2>/dev/null; then
-            echo "✅ 使用配置: $config"
-            break
-          fi
-        done
-
-        echo "开始编译 SukiSU 增强内核..."
+        echo "使用 gauguin_config..."
+        make gauguin_config
+       
+        echo "开始编译内核..."
         make -j$(nproc) all dtbs 2>&1 | tee build.log
      
     - name: Check build results
       run: |
         cd kernel-src
         if [ -f "arch/arm64/boot/Image" ]; then
-          echo "✅ SukiSU 内核编译成功！"
-          echo "文件:"
+          echo "✅ 内核编译成功！"
           ls -lh arch/arm64/boot/Image
-          echo "设备树:"
           find arch/arm64/boot/dts -name "*.dtb" -type f | head -5
         else
           echo "❌ 内核编译失败"
@@ -85,7 +68,7 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: sukisu-lineageos23-kernel
+        name: sukisu-gauguin-kernel
         path: |
           kernel-src/arch/arm64/boot/Image
           kernel-src/arch/arm64/boot/dts/**/*.dtb
