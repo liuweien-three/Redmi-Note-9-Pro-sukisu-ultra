@@ -1,145 +1,60 @@
-name: Build SukiSU Ultra Kernel for Gauguinpro
+name: Build SukiSU Kernel
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
-
-env:
-  KERNEL_NAME: SukiSU-Ultra-gauguinpro
-  KERNEL_DIR: kernel
-  ANY_KERNEL_DIR: AnyKernel3
-  CONFIG: vendor/gauguin_defconfig
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+   
     steps:
-
-    - name: Download Kernel Source
-      run: |
-        echo "🔧 Downloading kernel source from direct link..."
-        wget -O kernel.zip "https://github.com/LineageOS/android_kernel_xiaomi_gauguin/archive/refs/heads/lineage-23.0.zip"
-        
-        if [ -f "kernel.zip" ]; then
-          echo "✅ Kernel source downloaded, extracting..."
-          unzip -q kernel.zip
-          mv android_kernel_xiaomi_gauguin-lineage-23.0 ${{ env.KERNEL_DIR }}
-          echo "✅ Kernel source extracted to ${{ env.KERNEL_DIR }}"
-        else
-          echo "❌ Kernel source download failed"
-          exit 1
-        fi
-
-    - name: Integrate SukiSU Ultra
-      run: |
-        cd ${{ env.KERNEL_DIR }}
-        echo "🔧 Running SukiSU Ultra setup script..."
-
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash - || true
-        
-        echo "📋 Setup script execution completed"
-
-    - name: Get AnyKernel3
-      run: |
-        echo "🔧 Downloading AnyKernel3..."
-        wget -O anykernel3.zip "https://github.com/osm0sis/AnyKernel3/archive/refs/heads/master.zip"
-        unzip -q anykernel3.zip
-        mv AnyKernel3-master ${{ env.ANY_KERNEL_DIR }}
-        echo "✅ AnyKernel3 downloaded and extracted"
-
-    - name: Setup Build Environment
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          make \
-          build-essential \
-          libncurses-dev \
-          libssl-dev \
-          bc \
-          flex \
-          bison \
-          libelf-dev \
-          git \
-          zip \
-          unzip \
-          wget
-          file \
-          cpio \
-          python3
-
-        wget -qO- https://developer.arm.com/-/media/Files/downloads/gnu-a/10.3-2021.07/binrel/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu.tar.xz | tar -xJ
-        echo "GCC_PATH=$(pwd)/gcc-arm-10.3-2021.07-x86_64-aarch64-none-linux-gnu/bin" >> $GITHUB_ENV
-
-    - name: Setup Environment
-      run: |
-        echo "ARCH=arm64" >> $GITHUB_ENV
-        echo "SUBARCH=arm64" >> $GITHUB_ENV
-        echo "CROSS_COMPILE=aarch64-none-linux-gnu-" >> $GITHUB_ENV
-        echo "PATH=$GITHUB_PATH:$GCC_PATH" >> $GITHUB_ENV
-
-    - name: Build Kernel
-      run: |
-        cd ${{ env.KERNEL_DIR }}
-        
-        echo "🧹 Cleaning build directory..."
-        make O=out clean && make O=out mrproper
-        
-        echo "⚙️ Applying config: ${{ env.CONFIG }}"
-        make O=out ${{ env.CONFIG }}
-
-        echo "🔧 Ensuring SukiSU is enabled..."
-        if grep -q "CONFIG_SUKISU" out/.config; then
-          sed -i 's/CONFIG_SUKISU=.*/CONFIG_SUKISU=y/' out/.config
-          echo "✅ SukiSU enabled in config"
-        else
-          echo "CONFIG_SUKISU=y" >> out/.config
-          echo "✅ SukiSU added to config"
-        fi
-        
-        echo "🚀 Starting kernel compilation..."
-        make O=out -j$(nproc) \
-          CROSS_COMPILE=aarch64-none-linux-gnu-
-
-        if [ -f "out/arch/arm64/boot/Image.gz-dtb" ]; then
-          echo "✅ Kernel built successfully!"
-          ls -lh out/arch/arm64/boot/Image.gz-dtb
-          echo "📊 File size: $(du -h out/arch/arm64/boot/Image.gz-dtb | cut -f1)"
-        else
-          echo "❌ Kernel build failed - checking for output files..."
-          find out/arch/arm64/boot/ -type f 2>/dev/null | head -10
-          echo "🔍 Build log tail:"
-          tail -50 out/.config || true
-          exit 1
-        fi
-
-    - name: Package Kernel
-      run: |
-        echo "📦 Packaging kernel..."
-        cp ${{ env.KERNEL_DIR }}/out/arch/arm64/boot/Image.gz-dtb ${{ env.ANY_KERNEL_DIR }}/
-        
-        # 创建 anykernel.sh 脚本
-        cat > ${{ env.ANY_KERNEL_DIR }}/anykernel.sh << 'EOF'
-        #!/system/bin/sh
-        # AnyKernel3 Script for Gauguinpro
-        
-        block=/dev/block/bootdevice/by-name/boot;
-        is_slot_device=0;
-        ramdisk_compression=auto;
-        
-        . /tmp/anykernel/tools/ak3-core.sh;
-        
-        dump_boot;
-        write_boot;
-        EOF
-        
-        cd ${{ env.ANY_KERNEL_DIR }}
-        zip -r9 ../${{ env.KERNEL_NAME }}-$(date +%Y%m%d-%H%M).zip .
-
-    - name: Upload Kernel Zip
-      uses: actions/upload-artifact@v4
+    - name: Checkout SukiSU source
+      uses: actions/checkout@v3
       with:
-        name: ${{ env.KERNEL_NAME }}
-        path: ./*.zip
-        retention-days: 30
+        repository: SukiSU-Ultra/SukiSU-Ultra
+        path: sukisu
+       
+    - name: Download kernel source via mirror
+      run: |
+        wget https://mirrors.tuna.tsinghua.edu.cn/kernel/v4.x/linux-4.19.325.tar.xz
+        tar -xf linux-4.19.325.tar.xz
+        mv linux-4.19.325 kernel-src
+       
+    - name: Install dependencies
+      run: |
+        sudo sed -i 's/archive.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
+        sudo sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
+        sudo apt update
+        sudo apt install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc python3 git gcc-aarch64-linux-gnu
+       
+    - name: Apply SukiSU patches
+      run: |
+        cd kernel-src
+
+        cp ../sukisu/arch/arm64/configs/gauguin_defconfig arch/arm64/configs/
+
+        if [ -f "../sukisu/patch" ]; then
+          patch -p1 < ../sukisu/patch
+        fi
+       
+    - name: Build kernel
+      run: |
+        cd kernel-src
+        export ARCH=arm64
+        export SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+       
+        make gauguin_defconfig
+        make -j$(nproc) 2>&1 | tee build.log
+       
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: sukisu-kernel
+        path: |
+          kernel-src/arch/arm64/boot/Image.gz
+          kernel-src/arch/arm64/boot/dts/**/*.dtb
+          kernel-src/.config
+          kernel-src/build.log
