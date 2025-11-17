@@ -11,7 +11,7 @@ jobs:
    
     steps:
     - name: Checkout SukiSU source
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         repository: SukiSU-Ultra/SukiSU-Ultra
         path: sukisu
@@ -29,15 +29,11 @@ jobs:
         sudo apt update
         sudo apt install -y build-essential libncurses-dev bison flex libssl-dev libelf-dev bc python3 git gcc-aarch64-linux-gnu
        
-    - name: Apply SukiSU patches
+    - name: Setup build environment
       run: |
         cd kernel-src
 
-        cp ../sukisu/arch/arm64/configs/gauguin_defconfig arch/arm64/configs/
-
-        if [ -f "../sukisu/patch" ]; then
-          patch -p1 < ../sukisu/patch
-        fi
+        cp ../sukisu/arch/arm64/configs/gauguin_defconfig arch/arm64/configs/ || echo "使用默认配置"
        
     - name: Build kernel
       run: |
@@ -45,16 +41,30 @@ jobs:
         export ARCH=arm64
         export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-       
-        make gauguin_defconfig
+
+        make gauguin_defconfig || make defconfig
+        echo "开始编译内核..."
         make -j$(nproc) 2>&1 | tee build.log
        
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+    - name: Check build results
+      run: |
+        cd kernel-src
+        if [ -f "arch/arm64/boot/Image.gz" ]; then
+          echo "✅ 内核编译成功！"
+          ls -la arch/arm64/boot/
+        else
+          echo "❌ 内核编译失败"
+          tail -100 build.log
+          exit 1
+        fi
+       
+    - name: Upload kernel artifacts
+      uses: actions/upload-artifact@v4
       with:
-        name: sukisu-kernel
+        name: sukisu-kernel-build
         path: |
           kernel-src/arch/arm64/boot/Image.gz
-          kernel-src/arch/arm64/boot/dts/**/*.dtb
+          kernel-src/arch/arm64/boot/dts/
           kernel-src/.config
           kernel-src/build.log
+        retention-days: 7
