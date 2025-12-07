@@ -1,4 +1,4 @@
-name: Build KernelSU for gauguin
+name: Build Kernel with KernelSU
 
 on: workflow_dispatch
 
@@ -7,92 +7,79 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout kernel source
+    - name: Checkout kernel
       run: |
-        git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_gauguin -b lineage-23.0
+        git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_gauguin -b lineage-23.0 kernel
+        cd kernel
         
-    - name: Apply KernelSU 
+    - name: Clone KernelSU
       run: |
-        cd android_kernel_xiaomi_gauguin
+        cd kernel
+        git clone https://github.com/tiann/KernelSU.git --depth=1
         
-        echo "=== 设置 KernelSU ==="
+    - name: Manual KernelSU integration
+      run: |
+        cd kernel
+        
+        echo "=== 手动集成 KernelSU ==="
 
-        echo "添加 KernelSU 配置..."
+        mkdir -p drivers/kernelsu
+
+        cp -r KernelSU/kernel/* drivers/kernelsu/
+
+        KERNEL_VERSION=$(grep -E "^VERSION|^PATCHLEVEL" Makefile | tr -d ' ' | cut -d= -f2 | tr '\n' '.' | sed 's/\.$//')
+        echo "内核版本: $KERNEL_VERSION"
+
+        if [ -f "KernelSU/kernel/patches/4.19.patch" ]; then
+            echo "应用 4.19 补丁..."
+            patch -p1 < KernelSU/kernel/patches/4.19.patch 2>&1 | grep -v "ignored" || echo "补丁可能有警告"
+        fi
+
+        if ! grep -q "kernelsu" drivers/Kconfig; then
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        fi
+
+        if ! grep -q "kernelsu" drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+        fi
+
         echo -e "\n# KernelSU\nCONFIG_KSU=y\nCONFIG_KSU_DEBUG=n" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
-
-        echo "CONFIG_COMPAT=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
-        echo "CONFIG_OVERLAY_FS=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
+        echo "CONFIG_KPROBES=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
+        echo "CONFIG_HAVE_KPROBES=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
+        echo "CONFIG_KPROBE_EVENTS=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
         
-    - name: Install dependencies
+    - name: Install tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          libssl-dev \
-          bc \
-          flex \
-          bison \
-          libelf-dev \
-          lz4 \
-          lzop \
-          gcc-aarch64-linux-gnu \
-          python3 \
+        sudo apt update
+        sudo apt install -y build-essential gcc-aarch64-linux-gnu libssl-dev bc flex bison libelf-dev python3
         
-    - name: Build kernel 
+    - name: Build kernel
       run: |
-        cd android_kernel_xiaomi_gauguin
+        cd kernel
         
-        echo "=== 开始编译 ==="
-
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-
-        echo "1. 清理..."
-        make clean 2>/dev/null || true
-
-        echo "2. 配置内核..."
+        
+        echo "1. 配置内核..."
         make vendor/xiaomi/gauguin.config
-
-        echo "3. 检查配置状态:"
-        grep -E "KSU|COMPAT|OVERLAY" .config || echo "相关配置未找到"
-
-        echo "4. 编译内核..."
+        
+        echo "2. 检查 KSU 配置..."
+        grep -i ksu .config || echo "KSU 配置未找到"
+        
+        echo "3. 开始编译..."
         make -j$(nproc) 2>&1 | tee build.log
-
+        
         if [ -f "arch/arm64/boot/Image" ]; then
             echo "✅ 编译成功!"
-            echo "Image 大小: $(stat -c%s arch/arm64/boot/Image) 字节"
+            ls -lh arch/arm64/boot/Image
         else
             echo "❌ 编译失败"
-            echo "错误摘要:"
             grep -n "error:" build.log | head -20
             exit 1
         fi
         
-    - name: Collect artifacts
-      if: success()
-      run: |
-        cd android_kernel_xiaomi_gauguin
-        
-        mkdir -p output
-        
-        if [ -f "arch/arm64/boot/Image" ]; then
-            cp arch/arm64/boot/Image output/
-        fi
-        
-        if [ -f ".config" ]; then
-            cp .config output/
-        fi
-        
-        if [ -f "build.log" ]; then
-            cp build.log output/
-        fi
-        
-        echo "生成的文件:"
-        ls -la output/
-        
-    - name: Upload artifacts
+    - name: Upload kernel
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build
-        path: android_kernel_xiaomi_gauguin/output/
+        name: kernel-with-ksu
+        path: kernel/arch/arm64/boot/Image
