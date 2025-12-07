@@ -37,7 +37,6 @@ jobs:
           lzop \
           gcc-aarch64-linux-gnu \
           python3 \
-          python
         
     - name: Build kernel 
       run: |
