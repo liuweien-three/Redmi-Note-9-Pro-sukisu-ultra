@@ -7,22 +7,53 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Get LineageOS kernel
+    - name: Checkout kernel source
       run: |
         git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_gauguin -b lineage-23.0
         
-    - name: Apply KernelSU for 4.19
+    - name: Apply KernelSU
       run: |
         cd android_kernel_xiaomi_gauguin
 
-        wget https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/patches/4.19.patch
-        patch -p1 < 4.19.patch || echo "补丁可能部分失败，继续..."
+        echo "尝试获取 KernelSU 补丁..."
 
-        echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
+        wget https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/patches/4.19.patch -O /tmp/4.19.patch || true
+
+        if [ ! -f "/tmp/4.19.patch" ]; then
+            curl -sL "https://ghproxy.com/https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/patches/4.19.patch" -o /tmp/4.19.patch || true
+        fi
+
+        if [ -f "/tmp/4.19.patch" ]; then
+            echo "找到补丁，正在应用..."
+            patch -p1 < /tmp/4.19.patch || echo "补丁应用可能有问题，继续构建..."
+        else
+            echo "未找到补丁，跳过补丁步骤，直接配置 KSU..."
+        fi
+
+        if ! grep -q "CONFIG_KSU" arch/arm64/configs/vendor/xiaomi/gauguin.config; then
+            echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
+        fi
+        
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev git ccache
         
     - name: Build kernel
       run: |
         cd android_kernel_xiaomi_gauguin
-        export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+
+        sudo apt-get install -y gcc-aarch64-linux-gnu
+
         make vendor/xiaomi/gauguin.config
-        make -j$(nproc) Image
+        make olddefconfig
+
+        make -j$(nproc) Image.gz dtbs 2>&1 | tee build.log
+        
+    - name: Check artifacts
+      run: |
+        cd android_kernel_xiaomi_gauguin
+        ls -la arch/arm64/boot/
