@@ -59,7 +59,7 @@ jobs:
 
         echo "1. 配置内核..."
 
-        make vendor/xiaomi/gauguin_defconfig 2>&1 | tee config1.log || \
+        make vendor/xiaomi/gauguin.defconfig 2>&1 | tee config1.log || \
         make vendor/xiaomi/gauguin.config 2>&1 | tee config1.log || \
         make gauguin_defconfig 2>&1 | tee config1.log
         
