@@ -1,144 +1,28 @@
-name: Build KernelSU for gauguin
+name: Build KernelSU for gauguin (Fixed)
 
-on:
-  workflow_dispatch:  # 手动触发
-  push:
-    branches: [ main ]
-  schedule:
-    - cron: '0 0 * * 0'  # 每周日自动构建
-
-env:
-  KERNEL_VERSION: "lineage-23.0"
-  DEVICE: "gauguin"
-  ARCH: "arm64"
+on: workflow_dispatch
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout SukiSU Ultra source
-      uses: actions/checkout@v4
-      with:
-        repository: SukiSU-Ultra/SukiSU-Ultra
-        path: sukisu
-        ref: main
-        
-    - name: Checkout LineageOS kernel source
-      uses: actions/checkout@v4
-      with:
-        repository: LineageOS/android_kernel_xiaomi_gauguin
-        ref: ${{ env.KERNEL_VERSION }}
-        path: kernel-source
-        token: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: Setup build environment
+    - name: Get LineageOS kernel
       run: |
-        sudo apt update
-        sudo apt install -y \
-          build-essential \
-          libncurses-dev \
-          bison flex \
-          libssl-dev libelf-dev \
-          bc python3 \
-          git wget curl \
-          gcc-aarch64-linux-gnu \
-          g++-aarch64-linux-gnu \
-          ccache
-          
-        echo "CCACHE_DIR=/tmp/ccache" >> $GITHUB_ENV
-        ccache -M 5G
-        ccache -s
+        git clone --depth=1 https://github.com/LineageOS/android_kernel_xiaomi_gauguin -b lineage-23.0
         
-    - name: Integrate KernelSU from SukiSU
+    - name: Apply KernelSU for 4.19
       run: |
-        echo "=== 集成KernelSU ==="
+        cd android_kernel_xiaomi_gauguin
 
-        cp -r sukisu/kernel/kpm kernel-source/kernel/
-        cp sukisu/kernel/*.c sukisu/kernel/*.h kernel-source/kernel/ 2>/dev/null || true
+        wget https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/patches/4.19.patch
+        patch -p1 < 4.19.patch || echo "补丁可能部分失败，继续..."
 
-        cd kernel-source/kernel
-        echo -e "\n# KernelSU\nobj-\$(CONFIG_KSU) += kpm/" >> Makefile
-
-        for file in *.c; do
-          if grep -q "KSU\|kernelsu" "$file" 2>/dev/null; then
-            base=$(basename "$file" .c)
-            if [[ "$base" != "main" ]]; then
-              echo "obj-\$(CONFIG_KSU) += $base.o" >> Makefile
-            fi
-          fi
-        done
-
-        cd ..
-        CONFIG_FILE="arch/arm64/configs/vendor/xiaomi/gauguin.config"
-        if [ -f "$CONFIG_FILE" ]; then
-          echo -e "\n# KernelSU\nCONFIG_KSU=y\nCONFIG_KPROBES=y\nCONFIG_MODULES=y" >> "$CONFIG_FILE"
-        fi
-        
-        echo "✅ KernelSU集成完成"
+        echo "CONFIG_KSU=y" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
         
     - name: Build kernel
       run: |
-        cd kernel-source
-        
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CC=clang
-
+        cd android_kernel_xiaomi_gauguin
+        export ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
         make vendor/xiaomi/gauguin.config
-
-        echo "=== 关键配置检查 ==="
-        grep -E "CONFIG_(KSU|KPROBES|MODULES)" .config || echo "配置未找到"
-
-        echo "=== 开始编译 ==="
-        make -j$(nproc) Image dtbs 2>&1 | tee build.log
-        
-    - name: Check build artifacts
-      run: |
-        cd kernel-source
-        
-        if [ -f "arch/arm64/boot/Image" ]; then
-          echo "✅ 编译成功！"
-          echo "内核大小: $(wc -c < arch/arm64/boot/Image | awk '{print $1/1024/1024 " MB"}')"
-
-          if find kernel/kpm -name "*.ko" | grep -q .; then
-            echo "✅ KernelSU模块编译成功"
-          fi
-        else
-          echo "❌ 编译失败"
-          echo "最后100行日志:"
-          tail -100 build.log
-          exit 1
-        fi
-        
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: gauguin-kernelsu-${{ github.run_id }}
-        path: |
-          kernel-source/arch/arm64/boot/Image
-          kernel-source/arch/arm64/boot/dts/**/*.dtb
-          kernel-source/.config
-          kernel-source/build.log
-        retention-days: 90
-        
-    - name: Create release (optional)
-      if: success()
-      uses: softprops/action-gh-release@v1
-      with:
-        files: |
-          kernel-source/arch/arm64/boot/Image
-        tag_name: gauguin-kernelsu-${{ github.run_number }}
-        name: "KernelSU for gauguin (LineageOS ${{ env.KERNEL_VERSION }})"
-        body: |
-          🚀 自动构建的KernelSU内核
-          
-          **设备:** xiaomi gauguin (Redmi Note 9 Pro)
-          **内核版本:** LineageOS ${{ env.KERNEL_VERSION }}
-          **集成:** KernelSU from SukiSU Ultra
-          **构建时间:** ${{ github.event.head_commit.timestamp }}
-          
-          使用方法：
-          1. 下载 Image 文件
-          2. 打包到 boot.img
-          3. 刷入设备
+        make -j$(nproc) Image
