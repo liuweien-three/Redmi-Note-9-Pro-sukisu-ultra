@@ -28,6 +28,9 @@ jobs:
         echo "添加 KernelSU 配置..."
         echo -e "\n# KernelSU\nCONFIG_KSU=y\nCONFIG_KSU_DEBUG=n" >> arch/arm64/configs/vendor/xiaomi/gauguin.config
         
+        echo "配置尾部内容:"
+        tail -5 arch/arm64/configs/vendor/xiaomi/gauguin.config
+        
     - name: Install dependencies
       run: |
         sudo apt-get update
@@ -41,95 +44,76 @@ jobs:
           lz4 \
           lzop \
           gcc-aarch64-linux-gnu \
-          gcc-11-aarch64-linux-gnu \
-          python3 \
-          make
-      
-    - name: Build kernel 
+          python3
+        
+    - name: Build kernel
       run: |
         cd android_kernel_xiaomi_gauguin
         
-        echo "=== 开始完整编译 ==="
+        echo "=== 开始编译 ==="
 
         export ARCH=arm64
-        export SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
+
+        echo "1. 清理..."
         make clean 2>/dev/null || true
-        make mrproper 2>/dev/null || true
 
-        echo "1. 配置内核..."
+        echo "2. 配置内核..."
 
-        make vendor/xiaomi/gauguin.defconfig 2>&1 | tee config1.log || \
-        make vendor/xiaomi/gauguin.config 2>&1 | tee config1.log || \
-        make gauguin_defconfig 2>&1 | tee config1.log
-        
-        echo "2. 显示当前配置..."
-        grep -i "KSU\|kernelsu" .config || echo "KSU 配置未启用"
+        echo "尝试: make vendor/xiaomi/gauguin.config"
+        make vendor/xiaomi/gauguin.config
 
-        echo "3. 编译完整内核..."
-        time make -j$(nproc) 2>&1 | tee build_full.log
-        
-        echo "4. 检查生成的文件..."
-
-        echo "在 arch/arm64/boot/ 中的文件:"
-        ls -la arch/arm64/boot/ 2>/dev/null || echo "boot 目录不存在"
-        
-        echo "在根目录中的文件:"
-        ls -la vmlinux vmlinux.* 2>/dev/null || echo "vmlinux 不存在"
-
-        if [ -f "vmlinux" ]; then
-            echo "5. 从 vmlinux 生成 Image..."
-            aarch64-linux-gnu-objcopy -O binary -R .note -R .comment -S vmlinux arch/arm64/boot/Image
-        fi
-
-        if [ -f "arch/arm64/boot/Image" ]; then
-            echo "✅ 编译成功！"
-            echo "Image 大小: $(stat -c%s arch/arm64/boot/Image) 字节"
+        echo "3. 验证 .config 文件..."
+        if [ -f ".config" ]; then
+            echo ".config 已生成"
+            echo "检查 KSU 配置:"
+            grep -i "KSU\|kernelsu" .config || echo "KSU 配置未找到"
         else
-            echo "❌ 编译可能失败"
-            echo "查看错误日志:"
-            tail -100 build_full.log | grep -i "error\|fatal\|stop" || tail -50 build_full.log
+            echo "错误: .config 未生成"
+            exit 1
+        fi
+
+        echo "4. 编译内核..."
+        make -j$(nproc) 2>&1 | tee build.log
+        
+        echo "5. 检查输出..."
+        if [ -f "arch/arm64/boot/Image" ]; then
+            echo "✅ 编译成功!"
+            echo "Image 文件: arch/arm64/boot/Image"
+            ls -lh arch/arm64/boot/Image
+        else
+            echo "❌ 编译失败，检查日志..."
+            echo "最后错误:"
+            tail -30 build.log | grep -i "error\|fatal\|stop" || tail -30 build.log
+            echo "完整日志中的错误:"
+            grep -n "error:" build.log | head -10
+            exit 1
         fi
         
-    - name: Debug build
-      if: failure()
-      run: |
-        cd android_kernel_xiaomi_gauguin
-        
-        echo "=== 调试信息 ==="
-
-        echo "1. 内核版本:"
-        head -5 Makefile
-
-        echo "2. 工具链:"
-        which aarch64-linux-gnu-gcc
-        aarch64-linux-gnu-gcc --version | head -1
-
-        echo "3. 配置文件:"
-        ls -la .config arch/arm64/configs/vendor/xiaomi/gauguin.config 2>/dev/null || echo "无配置文件"
-
-        echo "4. 编译错误:"
-        if [ -f "build_full.log" ]; then
-            grep -n "error:" build_full.log | head -20
-            echo "..."
-            tail -100 build_full.log
-        fi
-        
-    - name: Collect output
+    - name: Collect artifacts
       if: success()
       run: |
         cd android_kernel_xiaomi_gauguin
         
         mkdir -p output
 
-        find arch/arm64/boot/ -type f -name "Image*" -o -name "*zImage*" 2>/dev/null | xargs -I {} cp {} output/ 2>/dev/null || true
-        
-        if [ -f "vmlinux" ]; then
-            cp vmlinux output/
+        if [ -f "arch/arm64/boot/Image" ]; then
+            cp arch/arm64/boot/Image output/
         fi
         
         if [ -f ".config" ]; then
             cp .config output/
+        fi
+        
+        if [ -f "build.log" ]; then
+            cp build.log output/
+        fi
+
+        if [ -d "arch/arm64/boot/dts" ]; then
+            find arch/arm64/boot/dts -name "*.dtb" -type f 2>/dev/null | head -5 | while read dtb; do
+                cp "$dtb" output/
+                echo "复制: $(basename "$dtb")"
+            done
         fi
         
         echo "生成的文件:"
