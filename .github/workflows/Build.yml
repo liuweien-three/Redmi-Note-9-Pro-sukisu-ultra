@@ -16,7 +16,7 @@ jobs:
       with:
         swap-size-gb: 10
 
-    - name: Install Minimal Dependencies
+    - name: Install Essential Dependencies
       run: |
         sudo apt-get update
 
@@ -28,55 +28,45 @@ jobs:
           bison \
           git \
           curl \
-          wget \
           make \
           gcc \
           tar \
-          gzip \
-          unzip
+          gzip
 
-        sudo apt-get install -y libncurses-dev 2>/dev/null || echo "跳过 libncurses-dev"
-        sudo apt-get install -y libelf-dev 2>/dev/null || echo "跳过 libelf-dev"
-        sudo apt-get install -y device-tree-compiler 2>/dev/null || echo "跳过 device-tree-compiler"
-        sudo apt-get install -y lzop 2>/dev/null || echo "跳过 lzop"
-        sudo apt-get install -y python3 2>/dev/null || echo "跳过 python3"
-        sudo apt-get install -y python3-pip 2>/dev/null || echo "跳过 python3-pip"
+        for pkg in libncurses-dev libelf-dev device-tree-compiler lzop python3; do
+          sudo apt-get install -y "$pkg" 2>/dev/null || echo "跳过 $pkg"
+        done
 
     - name: Prepare Workspace
       run: |
         mkdir -p ${{ github.workspace }}/kernel_workspace
         cd ${{ github.workspace }}/kernel_workspace
 
-    - name: Download AOSP Clang
+    - name: Download Toolchains via Git
       run: |
         cd ${{ github.workspace }}/kernel_workspace
-        echo "正在下载 AOSP Clang..."
-        wget -q --show-progress -O clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r510928.tar.gz
-        mkdir clang
-        tar -C clang/ -zxvf clang.tar.gz
-
-    - name: Download AOSP GCC
-      run: |
-        cd ${{ github.workspace }}/kernel_workspace
-        echo "下载AARCH64 GCC..."
-        wget -q --show-progress -O gcc-64.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-14.0.0_r1.tar.gz
-        mkdir gcc-64
-        tar -C gcc-64/ -zxvf gcc-64.tar.gz
-        echo "下载ARM32 GCC..."
-        wget -q --show-progress -O gcc-32.tar.gz https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-14.0.0_r1.tar.gz
-        mkdir gcc-32
-        tar -C gcc-32/ -zxvf gcc-32.tar.gz
+        
+        echo "1. 克隆 Clang 工具链..."
+        git clone https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86.git clang --depth=1 -b lineage-21.0
+        
+        echo "2. 克隆 GCC (aarch64) 工具链..."
+        git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-64 --depth=1
+        
+        echo "3. 克隆 GCC (arm) 工具链..."
+        git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-32 --depth=1
+        
+        echo "✅ 工具链就绪"
 
     - name: Clone Kernel Source
       run: |
         cd ${{ github.workspace }}/kernel_workspace
-        echo "正在克隆 LineageOS gauguin 内核..."
+        echo "克隆 LineageOS gauguin 内核..."
         git clone https://github.com/LineageOS/android_kernel_xiaomi_gauguin.git -b lineage-23 kernel --depth=1
 
     - name: Setup SukiSU Ultra
       run: |
         cd ${{ github.workspace }}/kernel_workspace/kernel
-        echo "正在整合 SukiSU Ultra..."
+        echo "整合 SukiSU Ultra..."
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
 
         CONFIG_FILE="arch/arm64/configs/vendor/xiaomi/gauguin.config"
@@ -86,9 +76,11 @@ jobs:
           echo "CONFIG_HAVE_KPROBES=y" >> "$CONFIG_FILE"
           echo "CONFIG_KPROBE_EVENTS=y" >> "$CONFIG_FILE"
           echo "CONFIG_OVERLAY_FS=y" >> "$CONFIG_FILE"
+          echo "✅ 已更新配置文件"
         else
-          echo "警告：配置文件 $CONFIG_FILE 不存在，请确认路径"
-          find arch/arm64/configs/ -name "*gauguin*" | head -5
+          echo "⚠️  配置文件不存在，请检查路径"
+          echo "可用配置:"
+          find arch/arm64/configs/ -name "*gauguin*" 2>/dev/null || echo "未找到相关配置"
         fi
 
     - name: Build Kernel
@@ -101,27 +93,33 @@ jobs:
         export CROSS_COMPILE_ARM32=${{ github.workspace }}/kernel_workspace/gcc-32/bin/arm-linux-androideabi-
         
         echo "=== 开始编译内核 ==="
-
-        make ARCH=arm64 distclean
+        echo "1. 清理..."
+        make ARCH=arm64 distclean 2>/dev/null || true
+        
+        echo "2. 应用配置..."
         make ARCH=arm64 vendor/xiaomi/gauguin.config
-
+        
+        echo "3. 编译内核..."
         make -j$(nproc --all) ARCH=arm64 \
              CC=clang \
              CROSS_COMPILE=${{ github.workspace }}/kernel_workspace/gcc-64/bin/aarch64-linux-android- \
              CROSS_COMPILE_ARM32=${{ github.workspace }}/kernel_workspace/gcc-32/bin/arm-linux-androideabi-
-        echo "=== 内核编译完成 ==="
+        
+        echo "=== 编译完成 ==="
 
-    - name: Check Build Output
+    - name: Check Output
       run: |
         cd ${{ github.workspace }}/kernel_workspace/kernel
         if [ -f arch/arm64/boot/Image.gz-dtb ]; then
-          echo "✅ 编译成功！产物："
-          ls -lh arch/arm64/boot/Image.gz-dtb
+          echo "✅ 编译成功！"
+          echo "文件位置: $(pwd)/arch/arm64/boot/Image.gz-dtb"
           echo "文件大小: $(du -h arch/arm64/boot/Image.gz-dtb | cut -f1)"
+          ls -la arch/arm64/boot/
         else
-          echo "❌ 编译失败，未找到内核镜像"
-          echo "当前目录结构:"
-          find . -name "*.dtb" -o -name "Image*" | head -20
+          echo "❌ 编译失败"
+          echo "当前目录: $(pwd)"
+          echo "寻找内核文件..."
+          find . -name "Image*" -o -name "*.dtb" | head -10
           exit 1
         fi
 
@@ -129,8 +127,8 @@ jobs:
       if: success()
       uses: actions/upload-artifact@v4
       with:
-        name: gauguin-kernel
+        name: gauguin-kernel-sukisu
         path: |
           ${{ github.workspace }}/kernel_workspace/kernel/arch/arm64/boot/Image.gz-dtb
           ${{ github.workspace }}/kernel_workspace/kernel/arch/arm64/boot/dtbo.img
-        retention-days: 7
+        retention-days: 5
