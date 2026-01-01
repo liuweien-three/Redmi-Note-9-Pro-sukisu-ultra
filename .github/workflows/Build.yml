@@ -34,9 +34,7 @@ jobs:
           flex \
           libssl-dev \
           libelf-dev \
-          # 只安装64位交叉编译器
           gcc-aarch64-linux-gnu \
-          # 可选：clang (如果内核支持)
           clang \
           llvm \
           lld
