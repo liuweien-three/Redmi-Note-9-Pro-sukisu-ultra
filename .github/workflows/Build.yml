@@ -1,141 +1,178 @@
-name: Build Gauguin Kernel with KernelSU
+name: Build Gauguin Kernel Properly
 
 on:
   workflow_dispatch:
-    inputs:
-      kernel_branch:
-        description: '内核分支'
-        default: 'lineage-23.0'
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
+    runs-on: ubuntu-22.04  # 使用22.04更稳定
+    timeout-minutes: 180
    
     steps:
-    # 第1步：检出仓库
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
      
-    # 第2步：下载配置文件并确保位置正确
-    - name: Download and prepare config
+    - name: Download config
       run: |
-        echo "=== 下载配置文件 ==="
+        curl -L -o config.txt "https://gamerminecraft.lanzouu.com/il3z23eyhihe"
+        mv config.txt device.config
+        echo "配置下载完成"
        
-        # 下载到工作空间根目录
-        curl -L -o /tmp/config.txt "https://gamerminecraft.lanzouu.com/il3z23eyhihe"
-       
-        # 检查文件
-        if [ ! -f "/tmp/config.txt" ]; then
-          echo "❌ 下载失败"
-          exit 1
-        fi
-       
-        # 复制到工作空间
-        cp /tmp/config.txt "$GITHUB_WORKSPACE/device.config"
-       
-        echo "✅ 配置文件已保存到：$GITHUB_WORKSPACE/device.config"
-        echo "文件大小：$(wc -l < "$GITHUB_WORKSPACE/device.config") 行"
-       
-    # 第3步：克隆内核源码
-    - name: Clone kernel source
+    - name: Clone kernel
       run: |
-        echo "克隆内核源码..."
-        git clone --depth=1 \
-          --branch "${{ github.event.inputs.kernel_branch }}" \
+        git clone --depth=1 --branch lineage-23.0 \
           https://github.com/LineageOS/android_kernel_xiaomi_gauguin \
-          "$GITHUB_WORKSPACE/kernel"
+          kernel
          
-        cd "$GITHUB_WORKSPACE/kernel"
-        echo "内核位置：$(pwd)"
-       
-    # 第4步：安装工具
-    - name: Setup build environment
+    - name: Install Android build tools
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential libncurses5-dev bc bison flex \
-          libssl-dev libelf-dev gcc-aarch64-linux-gnu
+        # Ubuntu 22.04 基础包
+        sudo apt update
+        sudo apt install -y \
+          build-essential \
+          libncurses5-dev \
+          libncursesw5-dev \
+          bc \
+          bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          lz4 \
+          lzop \
+          python3 \
+          git \
+          wget \
+          curl \
+          xxd
        
-    # 第5步：创建配置（使用绝对路径）
-    - name: Create kernel configuration
+        # 安装Android专用交叉编译器
+        echo "安装Android工具链..."
+        wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-13.0.0_r41.tar.gz
+        mkdir -p /opt/aarch64-linux-android-4.9
+        tar -xzf android-13.0.0_r41.tar.gz -C /opt/aarch64-linux-android-4.9
+       
+        # 安装32位兼容库（某些内核需要）
+        sudo apt install -y gcc-multilib
+       
+    - name: Prepare configuration
       run: |
-        cd "$GITHUB_WORKSPACE/kernel"
+        cd kernel
        
-        echo "=== 创建内核配置 ==="
+        # 使用device.config作为基础
+        cp ../device.config .config
        
-        # 使用绝对路径确保找到文件
-        CONFIG_FILE="$GITHUB_WORKSPACE/device.config"
+        # 清理配置格式
+        sed -i '/^$/d' .config
+        sed -i '/^#.*$/d' .config  # 先删除所有注释
        
-        if [ -f "$CONFIG_FILE" ]; then
-          echo "使用 device.config"
-          cp "$CONFIG_FILE" .config
-          echo "✅ 配置已复制"
-        else
-          echo "❌ 找不到配置文件：$CONFIG_FILE"
-          echo "当前目录内容："
-          ls -la "$GITHUB_WORKSPACE/"
-          exit 1
-        fi
-       
-        # 启用KernelSU选项（简化版，避免EOF问题）
+        # 启用基本选项（先只启用最关键的）
         echo "" >> .config
-        echo "# KernelSU Configurations" >> .config
+        echo "# Essential for KernelSU" >> .config
         echo "CONFIG_KPROBES=y" >> .config
         echo "CONFIG_MODULES=y" >> .config
         echo "CONFIG_OVERLAY_FS=y" >> .config
-        echo "CONFIG_KALLSYMS=y" >> .config
        
-        echo "配置行数：$(wc -l < .config)"
+        # 去重
+        awk '!seen[$1]++' .config > .config.tmp
+        mv .config.tmp .config
        
-    # 第6步：验证配置
-    - name: Verify configuration
+        echo "配置准备完成"
+       
+    - name: Fix common config issues
       run: |
-        cd "$GITHUB_WORKSPACE/kernel"
+        cd kernel
        
+        # 修复常见配置问题
         export ARCH=arm64
        
+        # 1. 确保使用正确的交叉编译器
+        echo "设置编译器..."
+        if [ -d "/opt/aarch64-linux-android-4.9" ]; then
+          export CROSS_COMPILE=/opt/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+        else
+          export CROSS_COMPILE=aarch64-linux-android-
+        fi
+       
+        # 2. 生成最终配置
         echo "生成最终配置..."
         make olddefconfig
        
-        echo "关键配置检查："
-        grep -E "KPROBES|MODULES|OVERLAY" .config || true
+        # 3. 检查并修复可能的问题
+        echo "检查配置..."
        
-    # 第7步：编译
-    - name: Build kernel
+        # 确保这些基本选项启用
+        for opt in MODULES KPROBES OVERLAY_FS; do
+          if ! grep -q "^CONFIG_${opt}=y" .config; then
+            echo "修复 CONFIG_${opt}..."
+            sed -i "/CONFIG_${opt}/d" .config
+            echo "CONFIG_${opt}=y" >> .config
+          fi
+        done
+       
+    - name: Build step by step
       run: |
-        cd "$GITHUB_WORKSPACE/kernel"
+        cd kernel
        
         export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-       
-        echo "开始编译..."
-        make -j$(nproc) Image.gz
-       
-        echo "编译完成！"
-        ls -lh arch/arm64/boot/
-       
-    # 第8步：打包结果
-    - name: Package results
-      run: |
-        mkdir -p "$GITHUB_WORKSPACE/output"
-       
-        # 复制内核镜像
-        if [ -f "$GITHUB_WORKSPACE/kernel/arch/arm64/boot/Image.gz" ]; then
-          cp "$GITHUB_WORKSPACE/kernel/arch/arm64/boot/Image.gz" "$GITHUB_WORKSPACE/output/"
-          echo "✅ 内核镜像已保存"
+        if [ -d "/opt/aarch64-linux-android-4.9" ]; then
+          export CROSS_COMPILE=/opt/aarch64-linux-android-4.9/bin/aarch64-linux-android-
+          export PATH="/opt/aarch64-linux-android-4.9/bin:$PATH"
         fi
        
-        # 复制配置
-        cp "$GITHUB_WORKSPACE/kernel/.config" "$GITHUB_WORKSPACE/output/kernel.config"
-        cp "$GITHUB_WORKSPACE/device.config" "$GITHUB_WORKSPACE/output/device.config"
+        echo "=== 逐步编译 ==="
        
-        echo "输出文件："
-        ls -la "$GITHUB_WORKSPACE/output/"
+        # 1. 先准备（通常会暴露问题）
+        echo "步骤1: make prepare..."
+        make prepare -j$(nproc) || {
+          echo "prepare失败，查看错误..."
+          exit 1
+        }
        
-    # 第9步：上传
-    - name: Upload artifacts
+        # 2. 编译vmlinux（内核主体）
+        echo "步骤2: make vmlinux..."
+        make vmlinux -j$(nproc) || {
+          echo "vmlinux编译失败"
+          # 继续尝试其他目标
+        }
+       
+        # 3. 编译模块
+        echo "步骤3: make modules..."
+        make modules -j$(nproc) || {
+          echo "模块编译失败"
+        }
+       
+        # 4. 编译最终镜像
+        echo "步骤4: make Image.gz..."
+        make Image.gz -j$(nproc) || {
+          echo "Image.gz编译失败"
+        }
+       
+    - name: Check build results
+      run: |
+        cd kernel
+       
+        echo "=== 编译结果检查 ==="
+       
+        if [ -f "arch/arm64/boot/Image.gz" ]; then
+          echo "✅ 成功生成 Image.gz"
+          ls -lh arch/arm64/boot/Image.gz
+        else
+          echo "❌ 未生成 Image.gz"
+          echo "尝试的文件："
+          find arch/arm64/boot/ -type f 2>/dev/null || true
+        fi
+       
+        if [ -f "vmlinux" ]; then
+          echo "✅ 成功生成 vmlinux"
+          ls -lh vmlinux
+        fi
+       
+    - name: Upload results
+      if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build
-        path: "$GITHUB_WORKSPACE/output/"
+        name: kernel-build-debug
+        path: |
+          kernel/.config
+          kernel/arch/arm64/boot/
+          kernel/vmlinux 2>/dev/null || true
