@@ -6,274 +6,136 @@ on:
       kernel_branch:
         description: '内核分支'
         default: 'lineage-23.0'
-      test_build_only:
-        description: '仅测试编译'
-        default: 'false'
-        type: boolean
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 120
    
     steps:
     # 第1步：检出仓库
     - name: Checkout repository
       uses: actions/checkout@v4
      
-    # 第2步：从蓝奏云下载配置文件
-    - name: Download device config from LanZou
+    # 第2步：下载配置文件并确保位置正确
+    - name: Download and prepare config
       run: |
-        echo "正在从蓝奏云下载配置文件..."
-        echo "链接：https://gamerminecraft.lanzouu.com/il3z23eyhihe"
+        echo "=== 下载配置文件 ==="
        
-        # 下载config.txt（蓝奏云可能需要处理重定向）
-        curl -L -o config.txt \
-          "https://gamerminecraft.lanzouu.com/il3z23eyhihe" \
-          || curl -L -o config.txt \
-          "https://wwi.lanzouu.com/il3z23eyhihe"
+        # 下载到工作空间根目录
+        curl -L -o /tmp/config.txt "https://gamerminecraft.lanzouu.com/il3z23eyhihe"
        
         # 检查文件
-        echo "下载完成："
-        ls -lh config.txt
-        echo "文件类型："
-        file config.txt
+        if [ ! -f "/tmp/config.txt" ]; then
+          echo "❌ 下载失败"
+          exit 1
+        fi
        
-        # 重命名为config
-        mv config.txt device.config
+        # 复制到工作空间
+        cp /tmp/config.txt "$GITHUB_WORKSPACE/device.config"
        
-        # 第3步：克隆内核源码
+        echo "✅ 配置文件已保存到：$GITHUB_WORKSPACE/device.config"
+        echo "文件大小：$(wc -l < "$GITHUB_WORKSPACE/device.config") 行"
+       
+    # 第3步：克隆内核源码
     - name: Clone kernel source
       run: |
-        echo "克隆 gauguin 内核源码..."
+        echo "克隆内核源码..."
         git clone --depth=1 \
           --branch "${{ github.event.inputs.kernel_branch }}" \
           https://github.com/LineageOS/android_kernel_xiaomi_gauguin \
-          kernel-source
+          "$GITHUB_WORKSPACE/kernel"
          
-        cd kernel-source
+        cd "$GITHUB_WORKSPACE/kernel"
         echo "内核位置：$(pwd)"
-        echo "内核版本：$(make kernelversion 2>/dev/null || echo '无法获取版本')"
        
-    # 第4步：安装编译工具
+    # 第4步：安装工具
     - name: Setup build environment
       run: |
-        echo "安装编译工具..."
         sudo apt-get update
         sudo apt-get install -y \
-          build-essential \
-          libncurses5-dev \
-          libncursesw5-dev \
-          bc \
-          bison \
-          flex \
-          libssl-dev \
-          libelf-dev \
-          gcc-aarch64-linux-gnu \
-          git \
-          wget \
-          curl
+          build-essential libncurses5-dev bc bison flex \
+          libssl-dev libelf-dev gcc-aarch64-linux-gnu
        
-        echo "工具链版本："
-        aarch64-linux-gnu-gcc --version | head -1
-       
-    # 第5步：创建内核配置
+    # 第5步：创建配置（使用绝对路径）
     - name: Create kernel configuration
       run: |
-        cd kernel-source
+        cd "$GITHUB_WORKSPACE/kernel"
        
         echo "=== 创建内核配置 ==="
        
-        # 如果有本地gauguin.config就用它
-        if [ -f "../../gauguin.config" ]; then
-          echo "使用仓库中的 gauguin.config"
-          cp ../../gauguin.config .config
+        # 使用绝对路径确保找到文件
+        CONFIG_FILE="$GITHUB_WORKSPACE/device.config"
+       
+        if [ -f "$CONFIG_FILE" ]; then
+          echo "使用 device.config"
+          cp "$CONFIG_FILE" .config
+          echo "✅ 配置已复制"
         else
-          echo "使用设备配置作为基础"
-          cp ../../device.config .config
+          echo "❌ 找不到配置文件：$CONFIG_FILE"
+          echo "当前目录内容："
+          ls -la "$GITHUB_WORKSPACE/"
+          exit 1
         fi
        
-        # 确保配置格式正确
-        echo "清理配置格式..."
-        sed -i '/^$/d' .config  # 删除空行
-        sed -i 's/^#.*is not set$//' .config  # 删除注释行
-       
-        # 启用KernelSU必需选项
-        echo "启用KernelSU选项..."
-        cat >> .config << 'EOF'
-
-        # 启用KernelSU必需选项
-        echo "启用KernelSU选项..."
+        # 启用KernelSU选项（简化版，避免EOF问题）
         echo "" >> .config
-        echo "# KernelSU Required Configurations" >> .config
+        echo "# KernelSU Configurations" >> .config
         echo "CONFIG_KPROBES=y" >> .config
-        echo "CONFIG_KRETPROBES=y" >> .config
         echo "CONFIG_MODULES=y" >> .config
-        echo "CONFIG_MODULE_UNLOAD=y" >> .config
-        echo "CONFIG_MODULE_FORCE_UNLOAD=y" >> .config
         echo "CONFIG_OVERLAY_FS=y" >> .config
         echo "CONFIG_KALLSYMS=y" >> .config
-        echo "CONFIG_KALLSYMS_ALL=y" >> .config
-        echo "CONFIG_DEBUG_FS=y" >> .config
        
-        # 检查关键配置
-        echo "检查关键配置状态："
-        for cfg in KPROBES MODULES OVERLAY_FS; do
-          if grep -q "^CONFIG_${cfg}=y" .config; then
-            echo "✅ CONFIG_${cfg}=y"
-          else
-            echo "❌ CONFIG_${cfg} 未启用，尝试修复..."
-            sed -i "/CONFIG_${cfg}/d" .config
-            echo "CONFIG_${cfg}=y" >> .config
-          fi
-        done
+        echo "配置行数：$(wc -l < .config)"
        
-        # 去重处理
-        echo "去重处理..."
-        awk '!seen[$1]++' .config > .config.tmp
-        mv .config.tmp .config
-       
-        echo "最终配置行数：$(wc -l < .config)"
-        echo "保存配置备份..."
-        cp .config ../final-kernel-config.txt
-       
-    # 第6步：配置验证
+    # 第6步：验证配置
     - name: Verify configuration
       run: |
-        cd kernel-source
-       
-        echo "=== 配置验证 ==="
+        cd "$GITHUB_WORKSPACE/kernel"
        
         export ARCH=arm64
        
-        # 生成最终配置
         echo "生成最终配置..."
         make olddefconfig
        
-        # 验证关键选项
-        echo "最终配置验证："
-        grep -E "KPROBES|MODULES|OVERLAY_FS|KALLSYMS" .config || true
+        echo "关键配置检查："
+        grep -E "KPROBES|MODULES|OVERLAY" .config || true
        
-        echo "配置验证完成"
-       
-    # 第7步：测试编译（可选）
-    - name: Test build (optional)
-      if: github.event.inputs.test_build_only == 'true'
+    # 第7步：编译
+    - name: Build kernel
       run: |
-        cd kernel-source
+        cd "$GITHUB_WORKSPACE/kernel"
        
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
        
-        echo "测试编译配置..."
-        make -j$(nproc) prepare
-       
-        echo "✅ 配置测试通过"
-       
-    # 第8步：完整编译
-    - name: Full kernel build
-      if: github.event.inputs.test_build_only != 'true'
-      run: |
-        cd kernel-source
-       
-        echo "=== 开始完整编译 ==="
-       
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-       
-        # 显示编译信息
-        echo "架构：$ARCH"
-        echo "交叉编译器：$CROSS_COMPILE"
-        echo "线程数：$(nproc)"
-       
-        # 编译内核
-        echo "编译内核镜像..."
+        echo "开始编译..."
         make -j$(nproc) Image.gz
        
-        echo "编译设备树..."
-        make -j$(nproc) dtbs 2>/dev/null || echo "设备树编译跳过"
-       
-        echo "编译模块..."
-        make -j$(nproc) modules
-       
         echo "编译完成！"
-        echo "输出文件："
         ls -lh arch/arm64/boot/
        
-    # 第9步：集成KernelSU（如果需要）
-    - name: Integrate KernelSU manually
-      if: github.event.inputs.test_build_only != 'true'
+    # 第8步：打包结果
+    - name: Package results
       run: |
-        echo "=== KernelSU集成说明 ==="
-        echo "由于配置已准备好KernelSU支持，"
-        echo "你可以手动集成KernelSU源码："
-        echo ""
-        echo "1. 克隆KernelSU:"
-        echo "   git clone https://github.com/KernelSU-Next/KernelSU-Next.git"
-        echo ""
-        echo "2. 应用补丁："
-        echo "   cd KernelSU-Next"
-        echo "   ./scripts/kernel_patch.sh ../kernel-source"
-        echo ""
-        echo "3. 重新编译内核"
-       
-    # 第10步：打包输出
-    - name: Package artifacts
-      if: github.event.inputs.test_build_only != 'true'
-      run: |
-        echo "=== 打包输出文件 ==="
-       
-        mkdir -p artifacts
+        mkdir -p "$GITHUB_WORKSPACE/output"
        
         # 复制内核镜像
-        if [ -f "kernel-source/arch/arm64/boot/Image.gz" ]; then
-          cp kernel-source/arch/arm64/boot/Image.gz artifacts/Image.gz
-          echo "✅ 内核镜像已复制"
+        if [ -f "$GITHUB_WORKSPACE/kernel/arch/arm64/boot/Image.gz" ]; then
+          cp "$GITHUB_WORKSPACE/kernel/arch/arm64/boot/Image.gz" "$GITHUB_WORKSPACE/output/"
+          echo "✅ 内核镜像已保存"
         fi
        
-        if [ -f "kernel-source/arch/arm64/boot/Image" ]; then
-          cp kernel-source/arch/arm64/boot/Image artifacts/Image
-          echo "✅ 内核镜像(未压缩)已复制"
-        fi
+        # 复制配置
+        cp "$GITHUB_WORKSPACE/kernel/.config" "$GITHUB_WORKSPACE/output/kernel.config"
+        cp "$GITHUB_WORKSPACE/device.config" "$GITHUB_WORKSPACE/output/device.config"
        
-        # 复制配置文件
-        cp kernel-source/.config artifacts/kernel.config
-        cp device.config artifacts/device-original.config
+        echo "输出文件："
+        ls -la "$GITHUB_WORKSPACE/output/"
        
-        # 创建说明文件
-        cat > artifacts/README.md << 'EOF'
-        # 内核编译结果
-       
-        ## 文件说明
-        - `Image.gz` - 压缩的内核镜像
-        - `Image` - 未压缩的内核镜像（如果存在）
-        - `kernel.config` - 最终内核配置文件
-        - `device-original.config` - 设备原始配置
-       
-        ## 下一步
-        1. 将内核镜像打包成boot.img
-        2. 通过fastboot刷入：
-           ```bash
-           fastboot flash boot boot.img
-           fastboot reboot
-           ```
-       
-        ## KernelSU集成
-        配置已启用KernelSU所需选项，需要：
-        1. 获取KernelSU源码
-        2. 应用内核补丁
-        3. 重新编译内核
-       
-        ⚠️ 刷机前请备份数据！
-        EOF
-       
-        echo "打包完成："
-        ls -la artifacts/
-       
-    # 第11步：上传结果
+    # 第9步：上传
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-$(date +%Y%m%d-%H%M%S)
-        path: artifacts/
-        retention-days: 30
+        name: kernel-build
+        path: "$GITHUB_WORKSPACE/output/"
