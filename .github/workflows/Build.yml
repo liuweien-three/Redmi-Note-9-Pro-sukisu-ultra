@@ -45,15 +45,6 @@ jobs:
           curl \
           xxd
        
-        # 安装Android专用交叉编译器
-        echo "安装Android工具链..."
-        wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-13.0.0_r41.tar.gz
-        mkdir -p /opt/aarch64-linux-android-4.9
-        tar -xzf android-13.0.0_r41.tar.gz -C /opt/aarch64-linux-android-4.9
-       
-        # 安装32位兼容库（某些内核需要）
-        sudo apt install -y gcc-multilib
-       
     - name: Prepare configuration
       run: |
         cd kernel
