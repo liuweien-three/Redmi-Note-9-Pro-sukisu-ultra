@@ -94,7 +94,7 @@ jobs:
           cp ../../gauguin.config .config
         else
           echo "使用设备配置作为基础"
-          cp ../../device.config .config
+          cp ../../config .config
         fi
        
         # 确保配置格式正确
