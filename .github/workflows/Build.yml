@@ -5,7 +5,7 @@ on:
     inputs:
       kernel_branch:
         description: '内核分支'
-        default: 'lineage-20.0'
+        default: 'lineage-23.0'
       test_build_only:
         description: '仅测试编译'
         default: 'false'
