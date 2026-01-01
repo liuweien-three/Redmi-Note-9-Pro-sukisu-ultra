@@ -1,175 +1,193 @@
-name: Build Gauguin Kernel Properly
+name: Build Gauguin Kernel (64-bit only)
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 使用22.04更稳定
-    timeout-minutes: 180
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
    
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
      
-    - name: Download config
+    - name: Download config file
       run: |
-        curl -L -o config.txt "https://gamerminecraft.lanzouu.com/il3z23eyhihe"
-        mv config.txt device.config
+        curl -L -o device.config "https://gamerminecraft.lanzouu.com/il3z23eyhihe"
         echo "配置下载完成"
        
-    - name: Clone kernel
+    - name: Clone kernel source
       run: |
         git clone --depth=1 --branch lineage-23.0 \
           https://github.com/LineageOS/android_kernel_xiaomi_gauguin \
           kernel
          
-    - name: Install Android build tools
+    - name: Install 64-bit build tools only
       run: |
-        # Ubuntu 22.04 基础包
         sudo apt update
         sudo apt install -y \
           build-essential \
           libncurses5-dev \
-          libncursesw5-dev \
           bc \
           bison \
           flex \
           libssl-dev \
           libelf-dev \
-          lz4 \
-          lzop \
-          python3 \
-          git \
-          wget \
-          curl \
-          xxd
-          
-          # 安装Android专用交叉编译器
-        echo "安装Android工具链..."
-        wget -q https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-13.0.0_r41.tar.gz
-        mkdir -p /opt/aarch64-linux-android-4.9
-        tar -xzf android-13.0.0_r41.tar.gz -C /opt/aarch64-linux-android-4.9
+          # 只安装64位交叉编译器
+          gcc-aarch64-linux-gnu \
+          # 可选：clang (如果内核支持)
+          clang \
+          llvm \
+          lld
        
-    - name: Prepare configuration
+        echo "工具安装完成"
+        echo "编译器版本:"
+        aarch64-linux-gnu-gcc --version | head -1
+        clang --version | head -1
+       
+    - name: Prepare kernel configuration
       run: |
         cd kernel
        
-        # 使用device.config作为基础
+        # 使用设备配置
         cp ../device.config .config
        
-        # 清理配置格式
-        sed -i '/^$/d' .config
-        sed -i '/^#.*$/d' .config  # 先删除所有注释
+        # 清理配置
+        echo "清理配置..."
+        sed -i '/^#/d' .config  # 删除所有注释行
+        sed -i '/^$/d' .config  # 删除空行
        
-        # 启用基本选项（先只启用最关键的）
+        # 启用KernelSU必需选项（最少选项）
         echo "" >> .config
-        echo "# Essential for KernelSU" >> .config
+        echo "# KernelSU minimal config" >> .config
         echo "CONFIG_KPROBES=y" >> .config
         echo "CONFIG_MODULES=y" >> .config
         echo "CONFIG_OVERLAY_FS=y" >> .config
+        echo "CONFIG_KALLSYMS=y" >> .config
        
         # 去重
         awk '!seen[$1]++' .config > .config.tmp
         mv .config.tmp .config
        
-        echo "配置准备完成"
+        echo "配置行数: $(wc -l < .config)"
        
-    - name: Fix common config issues
+    - name: Try build with GCC
+      id: build_gcc
+      continue-on-error: true
       run: |
         cd kernel
        
-        # 修复常见配置问题
         export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
        
-        # 1. 确保使用正确的交叉编译器
-        echo "设置编译器..."
-        if [ -d "/opt/aarch64-linux-android-4.9" ]; then
-          export CROSS_COMPILE=/opt/aarch64-linux-android-4.9/bin/aarch64-linux-android-
-        else
-          export CROSS_COMPILE=aarch64-linux-android-
-        fi
+        echo "=== 使用GCC编译 ==="
+        echo "编译器: $(which ${CROSS_COMPILE}gcc)"
        
-        # 2. 生成最终配置
-        echo "生成最终配置..."
+        # 生成配置
         make olddefconfig
        
-        # 3. 检查并修复可能的问题
-        echo "检查配置..."
+        # 尝试编译
+        make -j$(nproc) Image.gz 2>&1 | tee build.log
        
-        # 确保这些基本选项启用
-        for opt in MODULES KPROBES OVERLAY_FS; do
-          if ! grep -q "^CONFIG_${opt}=y" .config; then
-            echo "修复 CONFIG_${opt}..."
-            sed -i "/CONFIG_${opt}/d" .config
-            echo "CONFIG_${opt}=y" >> .config
-          fi
-        done
+        if [ -f "arch/arm64/boot/Image.gz" ]; then
+          echo "✅ GCC编译成功"
+          echo "success=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ GCC编译失败"
+          echo "success=false" >> $GITHUB_OUTPUT
+        fi
        
-    - name: Build step by step
+    - name: Try build with Clang (if GCC fails)
+      if: steps.build_gcc.outputs.success != 'true'
+      id: build_clang
+      continue-on-error: true
       run: |
         cd kernel
        
         export ARCH=arm64
-        if [ -d "/opt/aarch64-linux-android-4.9" ]; then
-          export CROSS_COMPILE=/opt/aarch64-linux-android-4.9/bin/aarch64-linux-android-
-          export PATH="/opt/aarch64-linux-android-4.9/bin:$PATH"
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export CC=clang
+        export LD=ld.lld
+        export AR=llvm-ar
+        export NM=llvm-nm
+       
+        echo "=== 使用Clang编译 ==="
+        echo "Clang版本: $(clang --version | head -1)"
+       
+        # 清理之前的构建
+        make mrproper
+        cp ../device.config .config
+       
+        # 添加Clang兼容选项
+        echo "" >> .config
+        echo "# Clang compatibility" >> .config
+        echo "CONFIG_KPROBES=y" >> .config
+        echo "CONFIG_MODULES=y" >> .config
+        echo "CONFIG_CC_IS_CLANG=y" >> .config
+        echo "CONFIG_LD_IS_LLD=y" >> .config
+       
+        make olddefconfig
+       
+        # 使用Clang编译
+        make CC=clang LD=ld.lld -j$(nproc) Image.gz 2>&1 | tee build_clang.log
+       
+        if [ -f "arch/arm64/boot/Image.gz" ]; then
+          echo "✅ Clang编译成功"
+          echo "success=true" >> $GITHUB_OUTPUT
+        else
+          echo "❌ Clang编译失败"
+          echo "success=false" >> $GITHUB_OUTPUT
         fi
        
-        echo "=== 逐步编译 ==="
+    - name: Build with simplified config (last resort)
+      if: steps.build_gcc.outputs.success != 'true' && steps.build_clang.outputs.success != 'true'
+      run: |
+        cd kernel
        
-        # 1. 先准备（通常会暴露问题）
-        echo "步骤1: make prepare..."
-        make prepare -j$(nproc) || {
-          echo "prepare失败，查看错误..."
-          exit 1
-        }
+        echo "=== 使用最简配置编译 ==="
        
-        # 2. 编译vmlinux（内核主体）
-        echo "步骤2: make vmlinux..."
-        make vmlinux -j$(nproc) || {
-          echo "vmlinux编译失败"
-          # 继续尝试其他目标
-        }
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
        
-        # 3. 编译模块
-        echo "步骤3: make modules..."
-        make modules -j$(nproc) || {
-          echo "模块编译失败"
-        }
+        # 完全清理
+        make mrproper
        
-        # 4. 编译最终镜像
-        echo "步骤4: make Image.gz..."
-        make Image.gz -j$(nproc) || {
-          echo "Image.gz编译失败"
-        }
+        # 使用defconfig（最基础的配置）
+        make defconfig
+       
+        # 只启用最必要的选项
+        echo "" >> .config
+        echo "CONFIG_MODULES=y" >> .config
+        echo "CONFIG_KPROBES=y" >> .config
+       
+        make olddefconfig
+       
+        echo "开始编译..."
+        make -j$(nproc) Image.gz
        
     - name: Check build results
       run: |
-        cd kernel
+        echo "=== 检查构建结果 ==="
        
-        echo "=== 编译结果检查 ==="
+        mkdir -p output
        
-        if [ -f "arch/arm64/boot/Image.gz" ]; then
-          echo "✅ 成功生成 Image.gz"
-          ls -lh arch/arm64/boot/Image.gz
+        if [ -f "kernel/arch/arm64/boot/Image.gz" ]; then
+          cp kernel/arch/arm64/boot/Image.gz output/
+          cp kernel/.config output/kernel.config
+          echo "✅ 编译成功！"
+          ls -lh output/
         else
-          echo "❌ 未生成 Image.gz"
-          echo "尝试的文件："
-          find arch/arm64/boot/ -type f 2>/dev/null || true
+          echo "❌ 编译失败"
+          echo "查看错误日志："
+          tail -50 kernel/build*.log 2>/dev/null || echo "无日志"
         fi
        
-        if [ -f "vmlinux" ]; then
-          echo "✅ 成功生成 vmlinux"
-          ls -lh vmlinux
-        fi
-       
-    - name: Upload results
+    - name: Upload artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build-debug
+        name: kernel-build-result
         path: |
-          kernel/.config
-          kernel/arch/arm64/boot/
-          kernel/vmlinux 2>/dev/null || true
+          output/
+          kernel/build*.log 2>/dev/null || true
