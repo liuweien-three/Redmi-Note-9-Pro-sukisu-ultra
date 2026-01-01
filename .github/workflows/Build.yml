@@ -42,11 +42,7 @@ jobs:
         # 重命名为config
         mv config.txt device.config
        
-        echo "设备配置行数：$(wc -l < device.config)"
-        echo "前5行内容："
-        head -5 device.config
-       
-    # 第3步：克隆内核源码
+        # 第3步：克隆内核源码
     - name: Clone kernel source
       run: |
         echo "克隆 gauguin 内核源码..."
@@ -94,7 +90,7 @@ jobs:
           cp ../../gauguin.config .config
         else
           echo "使用设备配置作为基础"
-          cp ../../config .config
+          cp ../../device.config .config
         fi
        
         # 确保配置格式正确
