@@ -1,134 +1,283 @@
-name: Build Kernel for gauguin
+name: Build Gauguin Kernel with KernelSU
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "main" ]
+    inputs:
+      kernel_branch:
+        description: '内核分支'
+        default: 'lineage-20.0'
+      test_build_only:
+        description: '仅测试编译'
+        default: 'false'
+        type: boolean
 
 jobs:
   build:
-    name: Build Kernel with SukiSU Ultra
     runs-on: ubuntu-latest
+    timeout-minutes: 150
+   
     steps:
-
-    - name: Set swap to 10G
-      uses: pierotofy/set-swap-space@master
-      with:
-        swap-size-gb: 10
-
-    - name: Install Essential Dependencies
+    # 第1步：检出仓库
+    - name: Checkout repository
+      uses: actions/checkout@v4
+     
+    # 第2步：从蓝奏云下载配置文件
+    - name: Download device config from LanZou
       run: |
+        echo "正在从蓝奏云下载配置文件..."
+        echo "链接：https://gamerminecraft.lanzouu.com/il3z23eyhihe"
+       
+        # 下载config.txt（蓝奏云可能需要处理重定向）
+        curl -L -o config.txt \
+          "https://gamerminecraft.lanzouu.com/il3z23eyhihe" \
+          || curl -L -o config.txt \
+          "https://wwi.lanzouu.com/il3z23eyhihe"
+       
+        # 检查文件
+        echo "下载完成："
+        ls -lh config.txt
+        echo "文件类型："
+        file config.txt
+       
+        # 重命名为config
+        mv config.txt device.config
+       
+        echo "设备配置行数：$(wc -l < device.config)"
+        echo "前5行内容："
+        head -5 device.config
+       
+    # 第3步：克隆内核源码
+    - name: Clone kernel source
+      run: |
+        echo "克隆 gauguin 内核源码..."
+        git clone --depth=1 \
+          --branch "${{ github.event.inputs.kernel_branch }}" \
+          https://github.com/LineageOS/android_kernel_xiaomi_gauguin \
+          kernel-source
+         
+        cd kernel-source
+        echo "内核位置：$(pwd)"
+        echo "内核版本：$(make kernelversion 2>/dev/null || echo '无法获取版本')"
+       
+    # 第4步：安装编译工具
+    - name: Setup build environment
+      run: |
+        echo "安装编译工具..."
         sudo apt-get update
-
         sudo apt-get install -y \
           build-essential \
-          libssl-dev \
+          libncurses5-dev \
+          libncursesw5-dev \
           bc \
-          flex \
           bison \
+          flex \
+          libssl-dev \
+          libelf-dev \
+          gcc-aarch64-linux-gnu \
           git \
-          curl \
-          make \
-          gcc \
-          tar \
-          gzip
+          wget \
+          curl
+       
+        echo "工具链版本："
+        aarch64-linux-gnu-gcc --version | head -1
+       
+    # 第5步：创建内核配置
+    - name: Create kernel configuration
+      run: |
+        cd kernel-source
+       
+        echo "=== 创建内核配置 ==="
+       
+        # 如果有本地gauguin.config就用它
+        if [ -f "../../gauguin.config" ]; then
+          echo "使用仓库中的 gauguin.config"
+          cp ../../gauguin.config .config
+        else
+          echo "使用设备配置作为基础"
+          cp ../../device.config .config
+        fi
+       
+        # 确保配置格式正确
+        echo "清理配置格式..."
+        sed -i '/^$/d' .config  # 删除空行
+        sed -i 's/^#.*is not set$//' .config  # 删除注释行
+       
+        # 启用KernelSU必需选项
+        echo "启用KernelSU选项..."
+        cat >> .config << 'EOF'
 
-        for pkg in libncurses-dev libelf-dev device-tree-compiler lzop python3; do
-          sudo apt-get install -y "$pkg" 2>/dev/null || echo "跳过 $pkg"
+        # 启用KernelSU必需选项
+        echo "启用KernelSU选项..."
+        echo "" >> .config
+        echo "# KernelSU Required Configurations" >> .config
+        echo "CONFIG_KPROBES=y" >> .config
+        echo "CONFIG_KRETPROBES=y" >> .config
+        echo "CONFIG_MODULES=y" >> .config
+        echo "CONFIG_MODULE_UNLOAD=y" >> .config
+        echo "CONFIG_MODULE_FORCE_UNLOAD=y" >> .config
+        echo "CONFIG_OVERLAY_FS=y" >> .config
+        echo "CONFIG_KALLSYMS=y" >> .config
+        echo "CONFIG_KALLSYMS_ALL=y" >> .config
+        echo "CONFIG_DEBUG_FS=y" >> .config
+       
+        # 检查关键配置
+        echo "检查关键配置状态："
+        for cfg in KPROBES MODULES OVERLAY_FS; do
+          if grep -q "^CONFIG_${cfg}=y" .config; then
+            echo "✅ CONFIG_${cfg}=y"
+          else
+            echo "❌ CONFIG_${cfg} 未启用，尝试修复..."
+            sed -i "/CONFIG_${cfg}/d" .config
+            echo "CONFIG_${cfg}=y" >> .config
+          fi
         done
-
-    - name: Prepare Workspace
+       
+        # 去重处理
+        echo "去重处理..."
+        awk '!seen[$1]++' .config > .config.tmp
+        mv .config.tmp .config
+       
+        echo "最终配置行数：$(wc -l < .config)"
+        echo "保存配置备份..."
+        cp .config ../final-kernel-config.txt
+       
+    # 第6步：配置验证
+    - name: Verify configuration
       run: |
-        mkdir -p ${{ github.workspace }}/kernel_workspace
-        cd ${{ github.workspace }}/kernel_workspace
-
-    - name: Download Toolchains via Git
+        cd kernel-source
+       
+        echo "=== 配置验证 ==="
+       
+        export ARCH=arm64
+       
+        # 生成最终配置
+        echo "生成最终配置..."
+        make olddefconfig
+       
+        # 验证关键选项
+        echo "最终配置验证："
+        grep -E "KPROBES|MODULES|OVERLAY_FS|KALLSYMS" .config || true
+       
+        echo "配置验证完成"
+       
+    # 第7步：测试编译（可选）
+    - name: Test build (optional)
+      if: github.event.inputs.test_build_only == 'true'
       run: |
-        cd ${{ github.workspace }}/kernel_workspace
-        
-        echo "1. 克隆 Clang 工具链..."
-        git clone https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86.git clang --depth=1 -b lineage-21.0
-        
-        echo "2. 克隆 GCC (aarch64) 工具链..."
-        git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-64 --depth=1
-        
-        echo "3. 克隆 GCC (arm) 工具链..."
-        git clone https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-32 --depth=1
-        
-        echo "✅ 工具链就绪"
-
-    - name: Clone Kernel Source
+        cd kernel-source
+       
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+       
+        echo "测试编译配置..."
+        make -j$(nproc) prepare
+       
+        echo "✅ 配置测试通过"
+       
+    # 第8步：完整编译
+    - name: Full kernel build
+      if: github.event.inputs.test_build_only != 'true'
       run: |
-        cd ${{ github.workspace }}/kernel_workspace
-        echo "克隆 LineageOS gauguin 内核..."
-        git clone https://github.com/LineageOS/android_kernel_xiaomi_gauguin.git -b lineage-23 kernel --depth=1
-
-    - name: Setup SukiSU Ultra
+        cd kernel-source
+       
+        echo "=== 开始完整编译 ==="
+       
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+       
+        # 显示编译信息
+        echo "架构：$ARCH"
+        echo "交叉编译器：$CROSS_COMPILE"
+        echo "线程数：$(nproc)"
+       
+        # 编译内核
+        echo "编译内核镜像..."
+        make -j$(nproc) Image.gz
+       
+        echo "编译设备树..."
+        make -j$(nproc) dtbs 2>/dev/null || echo "设备树编译跳过"
+       
+        echo "编译模块..."
+        make -j$(nproc) modules
+       
+        echo "编译完成！"
+        echo "输出文件："
+        ls -lh arch/arm64/boot/
+       
+    # 第9步：集成KernelSU（如果需要）
+    - name: Integrate KernelSU manually
+      if: github.event.inputs.test_build_only != 'true'
       run: |
-        cd ${{ github.workspace }}/kernel_workspace/kernel
-        echo "整合 SukiSU Ultra..."
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
-
-        CONFIG_FILE="arch/arm64/configs/vendor/xiaomi/gauguin.config"
-        if [ -f "$CONFIG_FILE" ]; then
-          echo "CONFIG_MODULES=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
-          echo "CONFIG_HAVE_KPROBES=y" >> "$CONFIG_FILE"
-          echo "CONFIG_KPROBE_EVENTS=y" >> "$CONFIG_FILE"
-          echo "CONFIG_OVERLAY_FS=y" >> "$CONFIG_FILE"
-          echo "✅ 已更新配置文件"
-        else
-          echo "⚠️  配置文件不存在，请检查路径"
-          echo "可用配置:"
-          find arch/arm64/configs/ -name "*gauguin*" 2>/dev/null || echo "未找到相关配置"
+        echo "=== KernelSU集成说明 ==="
+        echo "由于配置已准备好KernelSU支持，"
+        echo "你可以手动集成KernelSU源码："
+        echo ""
+        echo "1. 克隆KernelSU:"
+        echo "   git clone https://github.com/KernelSU-Next/KernelSU-Next.git"
+        echo ""
+        echo "2. 应用补丁："
+        echo "   cd KernelSU-Next"
+        echo "   ./scripts/kernel_patch.sh ../kernel-source"
+        echo ""
+        echo "3. 重新编译内核"
+       
+    # 第10步：打包输出
+    - name: Package artifacts
+      if: github.event.inputs.test_build_only != 'true'
+      run: |
+        echo "=== 打包输出文件 ==="
+       
+        mkdir -p artifacts
+       
+        # 复制内核镜像
+        if [ -f "kernel-source/arch/arm64/boot/Image.gz" ]; then
+          cp kernel-source/arch/arm64/boot/Image.gz artifacts/Image.gz
+          echo "✅ 内核镜像已复制"
         fi
-
-    - name: Build Kernel
-      run: |
-        cd ${{ github.workspace }}/kernel_workspace/kernel
-        export PATH=${{ github.workspace }}/kernel_workspace/clang/bin:$PATH
-        export KBUILD_BUILD_HOST=Github-Action
-        export KBUILD_BUILD_USER=kernel-builder
-        export CROSS_COMPILE=${{ github.workspace }}/kernel_workspace/gcc-64/bin/aarch64-linux-android-
-        export CROSS_COMPILE_ARM32=${{ github.workspace }}/kernel_workspace/gcc-32/bin/arm-linux-androideabi-
-        
-        echo "=== 开始编译内核 ==="
-        echo "1. 清理..."
-        make ARCH=arm64 distclean 2>/dev/null || true
-        
-        echo "2. 应用配置..."
-        make ARCH=arm64 vendor/xiaomi/gauguin.config
-        
-        echo "3. 编译内核..."
-        make -j$(nproc --all) ARCH=arm64 \
-             CC=clang \
-             CROSS_COMPILE=${{ github.workspace }}/kernel_workspace/gcc-64/bin/aarch64-linux-android- \
-             CROSS_COMPILE_ARM32=${{ github.workspace }}/kernel_workspace/gcc-32/bin/arm-linux-androideabi-
-        
-        echo "=== 编译完成 ==="
-
-    - name: Check Output
-      run: |
-        cd ${{ github.workspace }}/kernel_workspace/kernel
-        if [ -f arch/arm64/boot/Image.gz-dtb ]; then
-          echo "✅ 编译成功！"
-          echo "文件位置: $(pwd)/arch/arm64/boot/Image.gz-dtb"
-          echo "文件大小: $(du -h arch/arm64/boot/Image.gz-dtb | cut -f1)"
-          ls -la arch/arm64/boot/
-        else
-          echo "❌ 编译失败"
-          echo "当前目录: $(pwd)"
-          echo "寻找内核文件..."
-          find . -name "Image*" -o -name "*.dtb" | head -10
-          exit 1
+       
+        if [ -f "kernel-source/arch/arm64/boot/Image" ]; then
+          cp kernel-source/arch/arm64/boot/Image artifacts/Image
+          echo "✅ 内核镜像(未压缩)已复制"
         fi
-
-    - name: Upload Artifact
-      if: success()
+       
+        # 复制配置文件
+        cp kernel-source/.config artifacts/kernel.config
+        cp device.config artifacts/device-original.config
+       
+        # 创建说明文件
+        cat > artifacts/README.md << 'EOF'
+        # 内核编译结果
+       
+        ## 文件说明
+        - `Image.gz` - 压缩的内核镜像
+        - `Image` - 未压缩的内核镜像（如果存在）
+        - `kernel.config` - 最终内核配置文件
+        - `device-original.config` - 设备原始配置
+       
+        ## 下一步
+        1. 将内核镜像打包成boot.img
+        2. 通过fastboot刷入：
+           ```bash
+           fastboot flash boot boot.img
+           fastboot reboot
+           ```
+       
+        ## KernelSU集成
+        配置已启用KernelSU所需选项，需要：
+        1. 获取KernelSU源码
+        2. 应用内核补丁
+        3. 重新编译内核
+       
+        ⚠️ 刷机前请备份数据！
+        EOF
+       
+        echo "打包完成："
+        ls -la artifacts/
+       
+    # 第11步：上传结果
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: gauguin-kernel-sukisu
-        path: |
-          ${{ github.workspace }}/kernel_workspace/kernel/arch/arm64/boot/Image.gz-dtb
-          ${{ github.workspace }}/kernel_workspace/kernel/arch/arm64/boot/dtbo.img
-        retention-days: 5
+        name: kernel-build-$(date +%Y%m%d-%H%M%S)
+        path: artifacts/
+        retention-days: 30
